@@ -1,0 +1,42 @@
+services:
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: quizgen_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-quizgen}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-quizgen_secret}
+      POSTGRES_DB: ${DB_NAME:-quizgen}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-quizgen}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── App ─────────────────────────────────────────────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: quizgen_app
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DB_HOST: postgres
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - uploads:/tmp/quizgen_uploads
+
+volumes:
+  postgres_data:
+  uploads:

@@ -1,0 +1,14 @@
+version: "3.9"
+
+# Development override – mounts source code, runs with Air (hot reload)
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    volumes:
+      - .:/app
+      - uploads:/tmp/quizgen_uploads
+    environment:
+      APP_ENV: development
+    command: ["air", "-c", ".air.toml"]
