@@ -15,7 +15,6 @@ import (
 	"github.com/quizgen/quizgen/internal/repository"
 )
 
-// QuizService orchestrates quiz creation and management.
 type QuizService struct {
 	quizRepo *repository.QuizRepository
 	llm      *LLMService
@@ -26,7 +25,6 @@ func NewQuizService(quizRepo *repository.QuizRepository, llm *LLMService, cfg *c
 	return &QuizService{quizRepo: quizRepo, llm: llm, cfg: cfg}
 }
 
-// Generate calls LLM, persists result, and returns the quiz.
 func (s *QuizService) Generate(ctx context.Context, userID uuid.UUID, req *models.GenerateQuizRequest) (*models.Quiz, error) {
 	generated, err := s.llm.GenerateQuiz(ctx, req)
 	if err != nil {
@@ -58,7 +56,6 @@ func (s *QuizService) Generate(ctx context.Context, userID uuid.UUID, req *model
 	return quiz, nil
 }
 
-// GetFull returns a quiz with all questions and answers (owner check).
 func (s *QuizService) GetFull(ctx context.Context, quizID, userID uuid.UUID) (*models.Quiz, error) {
 	quiz, err := s.quizRepo.GetByID(ctx, quizID)
 	if err != nil || quiz == nil {
@@ -76,14 +73,12 @@ func (s *QuizService) GetFull(ctx context.Context, quizID, userID uuid.UUID) (*m
 	return quiz, nil
 }
 
-// CreatePersonalLink generates a unique session token for a student.
 func (s *QuizService) CreatePersonalLink(ctx context.Context, quizID uuid.UUID, studentName string) (*models.QuizSession, error) {
 	token, err := generateToken(16)
 	if err != nil {
 		return nil, err
 	}
 
-	// Check attempt limit
 	quiz, err := s.quizRepo.GetByID(ctx, quizID)
 	if err != nil || quiz == nil {
 		return nil, fmt.Errorf("quiz not found")
@@ -99,6 +94,7 @@ func (s *QuizService) CreatePersonalLink(ctx context.Context, quizID uuid.UUID, 
 	session := &models.QuizSession{
 		QuizID:      quizID,
 		Token:       token,
+		Mode:        models.ModeSolo,
 		StudentName: studentName,
 		AttemptNum:  1,
 	}
@@ -108,7 +104,6 @@ func (s *QuizService) CreatePersonalLink(ctx context.Context, quizID uuid.UUID, 
 	return session, nil
 }
 
-// SubmitAnswer records a student's answer for one question.
 func (s *QuizService) SubmitAnswer(ctx context.Context, sessionToken string, questionID uuid.UUID, selectedIDs []uuid.UUID) error {
 	session, err := s.quizRepo.GetSessionByToken(ctx, sessionToken)
 	if err != nil || session == nil {
@@ -118,10 +113,8 @@ func (s *QuizService) SubmitAnswer(ctx context.Context, sessionToken string, que
 		return fmt.Errorf("session already finished")
 	}
 
-	// Start session on first answer
 	_ = s.quizRepo.StartSession(ctx, session.ID)
 
-	// Determine correctness
 	questions, err := s.quizRepo.GetQuestions(ctx, session.QuizID)
 	if err != nil {
 		return err
@@ -146,7 +139,6 @@ func (s *QuizService) SubmitAnswer(ctx context.Context, sessionToken string, que
 	return s.quizRepo.SaveSessionAnswer(ctx, ans)
 }
 
-// FinishSession scores and closes a session.
 func (s *QuizService) FinishSession(ctx context.Context, token string) (*models.QuizSession, error) {
 	session, err := s.quizRepo.GetSessionByToken(ctx, token)
 	if err != nil || session == nil {
@@ -176,7 +168,6 @@ func (s *QuizService) FinishSession(ctx context.Context, token string) (*models.
 	return session, nil
 }
 
-// RegenerateQuestion replaces a single question in a quiz with a freshly generated one.
 func (s *QuizService) RegenerateQuestion(ctx context.Context, quizID, questionID, userID uuid.UUID) (*models.Question, error) {
 	quiz, err := s.quizRepo.GetByID(ctx, quizID)
 	if err != nil || quiz == nil || quiz.UserID != userID {
@@ -207,12 +198,13 @@ func (s *QuizService) RegenerateQuestion(ctx context.Context, quizID, questionID
 	}
 
 	newQ := models.Question{
-		ID:       uuid.New(),
-		QuizID:   quizID,
-		Position: old.Position,
-		Type:     old.Type,
-		Text:     sanitizeUTF8(gen.Text),
-		Explanation: sanitizeUTF8(gen.Explanation),
+		ID:            uuid.New(),
+		QuizID:        quizID,
+		Position:      old.Position,
+		Type:          old.Type,
+		Text:          sanitizeUTF8(gen.Text),
+		Explanation:   sanitizeUTF8(gen.Explanation),
+		TimeLimitSecs: old.TimeLimitSecs,
 	}
 	for j, ga := range gen.Answers {
 		newQ.Answers = append(newQ.Answers, models.Answer{
@@ -228,6 +220,40 @@ func (s *QuizService) RegenerateQuestion(ctx context.Context, quizID, questionID
 		return nil, err
 	}
 	return &newQ, nil
+}
+
+// ── Group Mode Methods ────────────────────────────────────────────────────────
+
+func (s *QuizService) UpdateGroupResult(ctx context.Context, sessionToken string) error {
+	session, err := s.quizRepo.GetSessionByToken(ctx, sessionToken)
+	if err != nil || session == nil || session.GroupSessionID == nil {
+		return nil // Not a group session
+	}
+
+	correct, err := s.quizRepo.CountCorrectAnswers(ctx, session.ID)
+	if err != nil {
+		return err
+	}
+
+	questions, err := s.quizRepo.GetQuestions(ctx, session.QuizID)
+	if err != nil {
+		return err
+	}
+
+	return s.quizRepo.UpdateGroupResult(ctx, *session.GroupSessionID, session.StudentName, correct, len(questions))
+}
+
+func (s *QuizService) FinalizeGroupResult(ctx context.Context, sessionToken string) error {
+	session, err := s.quizRepo.GetSessionByToken(ctx, sessionToken)
+	if err != nil || session == nil || session.GroupSessionID == nil {
+		return nil
+	}
+
+	if session.Score == nil {
+		return nil
+	}
+
+	return s.quizRepo.FinalizeGroupResult(ctx, *session.GroupSessionID, session.StudentName, *session.Score, 0)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -283,8 +309,6 @@ func max(a, b int) int {
 }
 
 func ptr[T any](v T) *T { return &v }
-
-// ── Auth helpers (hashing) ────────────────────────────────────────────────────
 
 func HashPassword(password string) (string, error) {
 	h, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)

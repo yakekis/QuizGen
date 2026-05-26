@@ -59,8 +59,10 @@ func main() {
 	r := gin.New()
 	r.Use(gin.Logger(), gin.Recovery())
 
+	// ← CORS Middleware (поддержка внешних подключений)
+	r.Use(corsMiddleware(cfg.CORS))
+
 	// Static files & SPA
-	// Vite кладёт ассеты в /assets/* (новый билд) и оставляет /static-совместимым (старая статика).
 	r.Static("/assets", "./static/assets")
 	r.Static("/static", "./static")
 	r.StaticFile("/favicon.ico", "./static/favicon.ico")
@@ -103,6 +105,9 @@ func main() {
 	api.POST("/sessions/:token/identify", quizHandler.IdentifySession)
 	api.POST("/sessions/:token/answers", quizHandler.SubmitAnswer)
 	api.POST("/sessions/:token/finish", quizHandler.FinishSession)
+	api.POST("/group/:access_code/join", quizHandler.JoinGroupSession)
+	api.GET("/group/:access_code/info", quizHandler.GetGroupSessionInfo)
+	api.GET("/group/:access_code/leaderboard", quizHandler.GetLeaderboard)
 
 	// Protected (teacher)
 	protected := api.Group("/")
@@ -122,6 +127,8 @@ func main() {
 		// Session (personal link) creation — teacher only
 		protected.POST("/quizzes/:id/sessions", quizHandler.CreateSession)
 
+		protected.POST("/quizzes/:id/group-sessions", quizHandler.CreateGroupSession)
+
 		// Generate (rate-limited)
 		genGroup := protected.Group("/quizzes")
 		genGroup.Use(middleware.RateLimit(userRepo, cfg.RateLimit))
@@ -130,7 +137,7 @@ func main() {
 
 	// ── Server ────────────────────────────────────────────────────────────────
 	srv := &http.Server{
-		Addr:         ":" + cfg.App.Port,
+		Addr:         ":" + cfg.App.Port, // ← :8080 = слушает ВСЕ интерфейсы (0.0.0.0)
 		Handler:      r,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 120 * time.Second, // generous for LLM calls
@@ -156,4 +163,52 @@ func main() {
 		log.Fatalf("forced shutdown: %v", err)
 	}
 	log.Println("Server stopped.")
+}
+
+// ← НОВАЯ ФУНКЦИЯ: CORS middleware
+func corsMiddleware(cfg config.CORSConfig) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		origin := c.Request.Header.Get("Origin")
+
+		// Если нет Origin — это не CORS-запрос, просто продолжаем
+		if origin == "" {
+			c.Next()
+			return
+		}
+
+		// Проверяем, разрешён ли origin
+		isAllowed := false
+		for _, pattern := range cfg.AllowedOrigins {
+			if pattern == "*" || pattern == origin {
+				isAllowed = true
+				break
+			}
+			// Поддержка wildcard: https://*.ngrok.io
+			if strings.HasPrefix(pattern, "https://*.") {
+				suffix := strings.TrimPrefix(pattern, "https://*.")
+				if strings.HasPrefix(origin, "https://") && strings.HasSuffix(origin, suffix) {
+					isAllowed = true
+					break
+				}
+			}
+		}
+
+		if isAllowed {
+			c.Header("Access-Control-Allow-Origin", origin)
+			if cfg.AllowCredentials {
+				c.Header("Access-Control-Allow-Credentials", "true")
+			}
+			c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH")
+			c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, Accept")
+			c.Header("Access-Control-Max-Age", "86400") // кэш preflight 24 часа
+		}
+
+		// Обработка preflight-запросов
+		if c.Request.Method == http.MethodOptions {
+			c.AbortWithStatus(http.StatusNoContent)
+			return
+		}
+
+		c.Next()
+	}
 }

@@ -10,6 +10,7 @@ import { QuizStatsPage } from './pages/QuizStatsPage';
 import { SessionDetailsPage } from './pages/SessionDetailsPage';
 import { QuizPrintPage } from './pages/QuizPrintPage';
 import { PlayerPage } from './pages/PlayerPage';
+import { GroupJoinPage } from './pages/GroupJoinPage'; // ← ДОБАВИТЬ ЭТУ СТРОКУ
 import { PageSpinner } from './components/Spinner';
 
 function Private({ children }: { children: JSX.Element }) {
@@ -19,7 +20,6 @@ function Private({ children }: { children: JSX.Element }) {
 }
 
 function PlayerShell() {
-  // Player не нуждается в Layout с навбаром учителя — это публичный плеер
   return (
     <div className="container-app py-8">
       <PlayerPage />
@@ -35,6 +35,7 @@ export default function App() {
           <Routes>
             <Route path="/auth" element={<AuthPage />} />
             <Route path="/play/:token" element={<PlayerShell />} />
+            <Route path="/group/:accessCode" element={<GroupJoinPage />} /> {/* ← ДОБАВИТЬ ЭТУ СТРОКУ */}
 
             <Route
               path="/*"

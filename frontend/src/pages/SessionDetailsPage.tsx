@@ -61,7 +61,6 @@ export function SessionDetailsPage() {
             const a = answersByQ.get(q.id);
             const isCorrect = a?.isCorrect === true;
             const isWrong = a && a.isCorrect === false;
-            const skipped = !a;
             return (
               <li
                 key={q.id}

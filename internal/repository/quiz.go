@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/lib/pq"
@@ -11,7 +12,6 @@ import (
 	"github.com/quizgen/quizgen/internal/models"
 )
 
-// QuizRepository handles all quiz-related DB operations.
 type QuizRepository struct {
 	db *sql.DB
 }
@@ -21,7 +21,6 @@ func NewQuizRepository(db *sql.DB) *QuizRepository {
 }
 
 // ── Quiz CRUD ─────────────────────────────────────────────────────────────────
-
 func (r *QuizRepository) Create(ctx context.Context, q *models.Quiz) error {
 	query := `
 		INSERT INTO quizzes
@@ -107,7 +106,6 @@ func (r *QuizRepository) Delete(ctx context.Context, id, userID uuid.UUID) error
 }
 
 // ── Questions ─────────────────────────────────────────────────────────────────
-
 func (r *QuizRepository) SaveQuestions(ctx context.Context, quizID uuid.UUID, questions []models.Question) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -115,7 +113,6 @@ func (r *QuizRepository) SaveQuestions(ctx context.Context, quizID uuid.UUID, qu
 	}
 	defer tx.Rollback()
 
-	// Remove existing
 	if _, err := tx.ExecContext(ctx, `DELETE FROM questions WHERE quiz_id=$1`, quizID); err != nil {
 		return err
 	}
@@ -183,7 +180,6 @@ func (r *QuizRepository) GetQuestions(ctx context.Context, quizID uuid.UUID) ([]
 		return nil, err
 	}
 
-	// Load answers
 	for i := range questions {
 		aRows, err := r.db.QueryContext(ctx, `
 			SELECT id, question_id, position, text, is_correct, created_at
@@ -206,25 +202,27 @@ func (r *QuizRepository) GetQuestions(ctx context.Context, quizID uuid.UUID) ([]
 }
 
 // ── Sessions ──────────────────────────────────────────────────────────────────
-
 func (r *QuizRepository) CreateSession(ctx context.Context, s *models.QuizSession) error {
 	if s.ID == uuid.Nil {
 		s.ID = uuid.New()
 	}
+	if s.Token == "" {
+		s.Token = generateToken(16)
+	}
 	return r.db.QueryRowContext(ctx, `
-		INSERT INTO quiz_sessions (id, quiz_id, token, student_name, attempt_num)
-		VALUES ($1,$2,$3,$4,$5)
+		INSERT INTO quiz_sessions (id, quiz_id, token, mode, group_session_id, student_name, attempt_num)
+		VALUES ($1,$2,$3,$4,$5,$6,$7)
 		RETURNING created_at`,
-		s.ID, s.QuizID, s.Token, s.StudentName, s.AttemptNum,
+		s.ID, s.QuizID, s.Token, s.Mode, s.GroupSessionID, s.StudentName, s.AttemptNum,
 	).Scan(&s.CreatedAt)
 }
 
 func (r *QuizRepository) GetSessionByToken(ctx context.Context, token string) (*models.QuizSession, error) {
 	s := &models.QuizSession{}
 	err := r.db.QueryRowContext(ctx, `
-		SELECT id, quiz_id, token, student_name, started_at, finished_at, score, attempt_num, created_at
+		SELECT id, quiz_id, token, mode, group_session_id, student_name, started_at, finished_at, score, attempt_num, created_at
 		FROM quiz_sessions WHERE token=$1`, token,
-	).Scan(&s.ID, &s.QuizID, &s.Token, &s.StudentName,
+	).Scan(&s.ID, &s.QuizID, &s.Token, &s.Mode, &s.GroupSessionID, &s.StudentName,
 		&s.StartedAt, &s.FinishedAt, &s.Score, &s.AttemptNum, &s.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -259,7 +257,6 @@ func (r *QuizRepository) SaveSessionAnswer(ctx context.Context, a *models.Sessio
 	return err
 }
 
-// CountCorrectAnswers — сколько ответов в сессии помечены как is_correct.
 func (r *QuizRepository) CountCorrectAnswers(ctx context.Context, sessionID uuid.UUID) (int, error) {
 	var n int
 	err := r.db.QueryRowContext(ctx, `
@@ -268,13 +265,12 @@ func (r *QuizRepository) CountCorrectAnswers(ctx context.Context, sessionID uuid
 	return n, err
 }
 
-// GetSessionByID — для проверок доступа учителя.
 func (r *QuizRepository) GetSessionByID(ctx context.Context, id uuid.UUID) (*models.QuizSession, error) {
 	s := &models.QuizSession{}
 	err := r.db.QueryRowContext(ctx, `
-		SELECT id, quiz_id, token, student_name, started_at, finished_at, score, attempt_num, created_at
+		SELECT id, quiz_id, token, mode, group_session_id, student_name, started_at, finished_at, score, attempt_num, created_at
 		FROM quiz_sessions WHERE id=$1`, id,
-	).Scan(&s.ID, &s.QuizID, &s.Token, &s.StudentName,
+	).Scan(&s.ID, &s.QuizID, &s.Token, &s.Mode, &s.GroupSessionID, &s.StudentName,
 		&s.StartedAt, &s.FinishedAt, &s.Score, &s.AttemptNum, &s.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -282,7 +278,6 @@ func (r *QuizRepository) GetSessionByID(ctx context.Context, id uuid.UUID) (*mod
 	return s, err
 }
 
-// GetSessionAnswers — все ответы ученика в сессии.
 func (r *QuizRepository) GetSessionAnswers(ctx context.Context, sessionID uuid.UUID) ([]models.SessionAnswer, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id, session_id, question_id, selected_answer_ids, is_correct, answered_at
@@ -370,8 +365,6 @@ func (r *QuizRepository) GetStats(ctx context.Context, quizID, userID uuid.UUID)
 	return stats, sRows.Err()
 }
 
-// IdentifySession сохраняет имя ученика для сессии, если оно ещё не задано.
-// Возвращает обновлённую сессию.
 func (r *QuizRepository) IdentifySession(ctx context.Context, token, name string) (*models.QuizSession, error) {
 	res, err := r.db.ExecContext(ctx, `
 		UPDATE quiz_sessions
@@ -385,7 +378,6 @@ func (r *QuizRepository) IdentifySession(ctx context.Context, token, name string
 	return r.GetSessionByToken(ctx, token)
 }
 
-// CountAttempts returns how many times a student (by session token prefix/name) finished this quiz.
 func (r *QuizRepository) CountAttempts(ctx context.Context, quizID uuid.UUID, studentName string) (int, error) {
 	var count int
 	err := r.db.QueryRowContext(ctx, `
@@ -394,4 +386,109 @@ func (r *QuizRepository) CountAttempts(ctx context.Context, quizID uuid.UUID, st
 		quizID, studentName,
 	).Scan(&count)
 	return count, err
+}
+
+// ── Group Session Methods ─────────────────────────────────────────────────────
+
+func (r *QuizRepository) CreateGroupSession(ctx context.Context, gs *models.GroupQuizSession) error {
+	if gs.ID == uuid.Nil {
+		gs.ID = uuid.New()
+	}
+	return r.db.QueryRowContext(ctx, `
+		INSERT INTO group_quiz_sessions 
+			(id, quiz_id, created_by, access_code, max_participants, start_time, end_time, is_active, show_leaderboard)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+		RETURNING created_at, updated_at`,
+		gs.ID, gs.QuizID, gs.CreatedBy, gs.AccessCode, gs.MaxParticipants,
+		gs.StartTime, gs.EndTime, gs.IsActive, gs.ShowLeaderboard,
+	).Scan(&gs.CreatedAt, &gs.UpdatedAt)
+}
+
+func (r *QuizRepository) GetGroupSessionByCode(ctx context.Context, code string) (*models.GroupQuizSession, error) {
+	gs := &models.GroupQuizSession{}
+	err := r.db.QueryRowContext(ctx, `
+		SELECT id, quiz_id, created_by, access_code, max_participants, start_time, end_time, 
+		       is_active, show_leaderboard, created_at, updated_at
+		FROM group_quiz_sessions WHERE access_code = $1`, code,
+	).Scan(&gs.ID, &gs.QuizID, &gs.CreatedBy, &gs.AccessCode, &gs.MaxParticipants,
+		&gs.StartTime, &gs.EndTime, &gs.IsActive, &gs.ShowLeaderboard, &gs.CreatedAt, &gs.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return gs, err
+}
+
+func (r *QuizRepository) CloseGroupSession(ctx context.Context, id uuid.UUID) error {
+	_, err := r.db.ExecContext(ctx, `UPDATE group_quiz_sessions SET is_active = false WHERE id = $1`, id)
+	return err
+}
+
+func (r *QuizRepository) InitGroupResult(ctx context.Context, groupSessionID uuid.UUID, studentName string) error {
+	_, err := r.db.ExecContext(ctx, `
+		INSERT INTO group_quiz_results (group_session_id, student_name, score, total_questions)
+		VALUES ($1, $2, 0, 0)
+		ON CONFLICT (group_session_id, student_name) DO NOTHING`,
+		groupSessionID, studentName)
+	return err
+}
+
+func (r *QuizRepository) UpdateGroupResult(ctx context.Context, groupSessionID uuid.UUID, studentName string, correctAnswers, totalQuestions int) error {
+	score := 0.0
+	if totalQuestions > 0 {
+		score = float64(correctAnswers) / float64(totalQuestions)
+	}
+	_, err := r.db.ExecContext(ctx, `
+		UPDATE group_quiz_results 
+		SET score = $1, total_questions = $2
+		WHERE group_session_id = $3 AND student_name = $4`,
+		score, totalQuestions, groupSessionID, studentName)
+	return err
+}
+
+func (r *QuizRepository) FinalizeGroupResult(ctx context.Context, groupSessionID uuid.UUID, studentName string, score float64, totalQuestions int) error {
+	_, err := r.db.ExecContext(ctx, `
+		UPDATE group_quiz_results 
+		SET score = $1, total_questions = $2, completed_at = NOW()
+		WHERE group_session_id = $3 AND student_name = $4`,
+		score, totalQuestions, groupSessionID, studentName)
+	return err
+}
+
+func (r *QuizRepository) GetGroupLeaderboard(ctx context.Context, accessCode string) ([]models.LeaderboardEntry, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT 
+			gr.student_name,
+			gr.score,
+			gr.total_questions,
+			gr.completed_at,
+			RANK() OVER (ORDER BY gr.score DESC, gr.completed_at ASC) as rank
+		FROM group_quiz_results gr
+		JOIN group_quiz_sessions gs ON gr.group_session_id = gs.id
+		WHERE gs.access_code = $1 AND gs.is_active = true AND gr.total_questions > 0
+		ORDER BY gr.score DESC, gr.completed_at ASC
+		LIMIT 50`, accessCode)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entries []models.LeaderboardEntry
+	for rows.Next() {
+		var e models.LeaderboardEntry
+		if err := rows.Scan(&e.StudentName, &e.Score, &e.TotalQuestions, &e.CompletedAt, &e.Rank); err != nil {
+			return nil, err
+		}
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+func generateToken(n int) string {
+	const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = chars[time.Now().UnixNano()%int64(len(chars))]
+	}
+	return string(b)
 }

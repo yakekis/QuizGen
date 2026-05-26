@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -29,16 +30,14 @@ func NewQuizHandler(quizSvc *service.QuizService, quizRepo *repository.QuizRepos
 }
 
 // ── POST /api/quizzes/generate ────────────────────────────────────────────────
-
 func (h *QuizHandler) Generate(c *gin.Context) {
 	userID := mustUserID(c)
 
-	// Parse multipart form (optional file upload + JSON fields)
 	maxBytes := int64(h.cfg.Upload.MaxSizeMB) << 20
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBytes)
 
 	if err := c.Request.ParseMultipartForm(maxBytes); err != nil {
-		// Might be plain JSON — try that
+		// Might be plain JSON
 	}
 
 	req := &models.GenerateQuizRequest{
@@ -63,12 +62,10 @@ func (h *QuizHandler) Generate(c *gin.Context) {
 		req.TimeLimitSecs = &v
 	}
 
-	// Parse question types
 	for _, t := range c.PostFormArray("question_types") {
 		req.QuestionTypes = append(req.QuestionTypes, models.QuestionType(t))
 	}
 
-	// Handle optional file upload
 	file, header, err := c.Request.FormFile("file")
 	if err == nil {
 		defer file.Close()
@@ -85,7 +82,6 @@ func (h *QuizHandler) Generate(c *gin.Context) {
 		req.SourceText = text
 	}
 
-	// Fallback: plain JSON body (no file)
 	if req.Subject == "" {
 		var jsonReq models.GenerateQuizRequest
 		if err := c.ShouldBindJSON(&jsonReq); err == nil {
@@ -107,7 +103,6 @@ func (h *QuizHandler) Generate(c *gin.Context) {
 }
 
 // ── GET /api/quizzes ──────────────────────────────────────────────────────────
-
 func (h *QuizHandler) List(c *gin.Context) {
 	userID := mustUserID(c)
 	quizzes, err := h.quizRepo.ListByUser(c.Request.Context(), userID)
@@ -119,7 +114,6 @@ func (h *QuizHandler) List(c *gin.Context) {
 }
 
 // ── GET /api/quizzes/:id ──────────────────────────────────────────────────────
-
 func (h *QuizHandler) Get(c *gin.Context) {
 	userID := mustUserID(c)
 	quizID, err := uuid.Parse(c.Param("id"))
@@ -137,7 +131,6 @@ func (h *QuizHandler) Get(c *gin.Context) {
 }
 
 // ── PUT /api/quizzes/:id ──────────────────────────────────────────────────────
-
 func (h *QuizHandler) Update(c *gin.Context) {
 	userID := mustUserID(c)
 	quizID, err := uuid.Parse(c.Param("id"))
@@ -160,7 +153,6 @@ func (h *QuizHandler) Update(c *gin.Context) {
 		return
 	}
 
-	// Save questions if provided
 	if len(body.Questions) > 0 {
 		if err := h.quizRepo.SaveQuestions(c.Request.Context(), quizID, body.Questions); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -172,7 +164,6 @@ func (h *QuizHandler) Update(c *gin.Context) {
 }
 
 // ── DELETE /api/quizzes/:id ───────────────────────────────────────────────────
-
 func (h *QuizHandler) Delete(c *gin.Context) {
 	userID := mustUserID(c)
 	quizID, err := uuid.Parse(c.Param("id"))
@@ -188,7 +179,6 @@ func (h *QuizHandler) Delete(c *gin.Context) {
 }
 
 // ── POST /api/quizzes/:id/publish ────────────────────────────────────────────
-
 func (h *QuizHandler) Publish(c *gin.Context) {
 	userID := mustUserID(c)
 	quizID, _ := uuid.Parse(c.Param("id"))
@@ -207,7 +197,6 @@ func (h *QuizHandler) Publish(c *gin.Context) {
 }
 
 // ── POST /api/quizzes/:id/sessions ───────────────────────────────────────────
-
 func (h *QuizHandler) CreateSession(c *gin.Context) {
 	quizID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
@@ -231,8 +220,187 @@ func (h *QuizHandler) CreateSession(c *gin.Context) {
 	})
 }
 
-// ── GET /api/sessions/:token ──────────────────────────────────────────────────
+// ── POST /api/quizzes/:id/group-sessions ─────────────────────────────────────
+func (h *QuizHandler) CreateGroupSession(c *gin.Context) {
+	userID := mustUserID(c)
+	quizID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid quiz id"})
+		return
+	}
 
+	var req models.CreateGroupSessionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Генерируем код доступа, если не передан
+	accessCode := req.AccessCode
+	if accessCode == "" {
+		accessCode = generateRandomCode(6)
+	}
+
+	now := time.Now()
+	groupSession := &models.GroupQuizSession{
+		QuizID:          quizID,
+		CreatedBy:       userID,
+		AccessCode:      accessCode,
+		MaxParticipants: req.MaxParticipants,
+		IsActive:        true,
+		ShowLeaderboard: req.ShowLeaderboard,
+	}
+
+	if req.StartInMinutes > 0 {
+		start := now.Add(time.Duration(req.StartInMinutes) * time.Minute)
+		groupSession.StartTime = &start
+	}
+	if req.DurationMinutes > 0 {
+		end := now.Add(time.Duration(req.StartInMinutes+req.DurationMinutes) * time.Minute)
+		groupSession.EndTime = &end
+	}
+
+	if err := h.quizRepo.CreateGroupSession(c.Request.Context(), groupSession); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create group session"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"session_id":       groupSession.ID,
+		"access_code":      groupSession.AccessCode,
+		"start_time":       groupSession.StartTime,
+		"end_time":         groupSession.EndTime,
+		"join_url":         fmt.Sprintf("/group/%s", groupSession.AccessCode),
+		"show_leaderboard": groupSession.ShowLeaderboard,
+	})
+}
+
+// ── POST /api/group/:access_code/join ────────────────────────────────────────
+func (h *QuizHandler) JoinGroupSession(c *gin.Context) {
+	accessCode := strings.ToUpper(c.Param("access_code"))
+
+	var req models.JoinGroupSessionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "enter your name"})
+		return
+	}
+
+	groupSession, err := h.quizRepo.GetGroupSessionByCode(c.Request.Context(), accessCode)
+	if err != nil || groupSession == nil || !groupSession.IsActive {
+		c.JSON(http.StatusNotFound, gin.H{"error": "session not found or closed"})
+		return
+	}
+
+	// Проверка: не началось ли ещё?
+	if groupSession.StartTime != nil && time.Now().Before(*groupSession.StartTime) {
+		c.JSON(http.StatusOK, gin.H{
+			"status":     "waiting",
+			"starts_in":  groupSession.StartTime.Sub(time.Now()).Seconds(),
+			"session_id": groupSession.ID,
+			"quiz_id":    groupSession.QuizID,
+		})
+		return
+	}
+
+	// Создаём персональную сессию ученика
+	studentSession := &models.QuizSession{
+		QuizID:         groupSession.QuizID,
+		Mode:           models.ModeGroup,
+		GroupSessionID: &groupSession.ID,
+		StudentName:    req.StudentName,
+		StartedAt:      ptr(time.Now()),
+	}
+	if err := h.quizRepo.CreateSession(c.Request.Context(), studentSession); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to join"})
+		return
+	}
+
+	// Инициализируем запись в результатах
+	_ = h.quizRepo.InitGroupResult(c.Request.Context(), groupSession.ID, req.StudentName)
+
+	var endsIn *float64
+	if groupSession.EndTime != nil {
+		seconds := groupSession.EndTime.Sub(time.Now()).Seconds()
+		endsIn = &seconds
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":           "started",
+		"session_token":    studentSession.Token,
+		"quiz_id":          groupSession.QuizID,
+		"ends_in":          endsIn,
+		"show_leaderboard": groupSession.ShowLeaderboard,
+	})
+}
+
+// ── GET /api/group/:access_code/info ─────────────────────────────────────────
+func (h *QuizHandler) GetGroupSessionInfo(c *gin.Context) {
+	accessCode := strings.ToUpper(c.Param("access_code"))
+
+	groupSession, err := h.quizRepo.GetGroupSessionByCode(c.Request.Context(), accessCode)
+	if err != nil || groupSession == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "session not found"})
+		return
+	}
+
+	quiz, _ := h.quizRepo.GetByID(c.Request.Context(), groupSession.QuizID)
+
+	response := gin.H{
+		"access_code":      groupSession.AccessCode,
+		"quiz_title":       quiz.Title,
+		"is_active":        groupSession.IsActive,
+		"show_leaderboard": groupSession.ShowLeaderboard,
+		"max_participants": groupSession.MaxParticipants,
+	}
+
+	if groupSession.StartTime != nil {
+		response["start_time"] = groupSession.StartTime
+		response["starts_in"] = groupSession.StartTime.Sub(time.Now()).Seconds()
+	}
+	if groupSession.EndTime != nil {
+		response["end_time"] = groupSession.EndTime
+		response["ends_in"] = groupSession.EndTime.Sub(time.Now()).Seconds()
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
+// ── GET /api/group/:access_code/leaderboard ──────────────────────────────────
+func (h *QuizHandler) GetLeaderboard(c *gin.Context) {
+	accessCode := strings.ToUpper(c.Param("access_code"))
+
+	entries, err := h.quizRepo.GetGroupLeaderboard(c.Request.Context(), accessCode)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch leaderboard"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"updated_at": time.Now(),
+		"entries":    entries,
+	})
+}
+
+// ── POST /api/group/:access_code/finish ──────────────────────────────────────
+func (h *QuizHandler) FinishGroupSession(c *gin.Context) {
+	userID := mustUserID(c)
+	accessCode := strings.ToUpper(c.Param("access_code"))
+
+	groupSession, err := h.quizRepo.GetGroupSessionByCode(c.Request.Context(), accessCode)
+	if err != nil || groupSession == nil || groupSession.CreatedBy != userID {
+		c.JSON(http.StatusNotFound, gin.H{"error": "session not found or access denied"})
+		return
+	}
+
+	if err := h.quizRepo.CloseGroupSession(c.Request.Context(), groupSession.ID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to close session"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "closed"})
+}
+
+// ── GET /api/sessions/:token ──────────────────────────────────────────────────
 func (h *QuizHandler) GetSession(c *gin.Context) {
 	token := c.Param("token")
 	session, err := h.quizRepo.GetSessionByToken(c.Request.Context(), token)
@@ -261,7 +429,6 @@ func (h *QuizHandler) GetSession(c *gin.Context) {
 }
 
 // ── POST /api/quizzes/:id/questions/:qid/regenerate ──────────────────────────
-
 func (h *QuizHandler) RegenerateQuestion(c *gin.Context) {
 	userID := mustUserID(c)
 	quizID, err := uuid.Parse(c.Param("id"))
@@ -283,7 +450,6 @@ func (h *QuizHandler) RegenerateQuestion(c *gin.Context) {
 }
 
 // ── POST /api/sessions/:token/identify ───────────────────────────────────────
-
 func (h *QuizHandler) IdentifySession(c *gin.Context) {
 	token := c.Param("token")
 
@@ -309,7 +475,6 @@ func (h *QuizHandler) IdentifySession(c *gin.Context) {
 }
 
 // ── POST /api/sessions/:token/answers ────────────────────────────────────────
-
 func (h *QuizHandler) SubmitAnswer(c *gin.Context) {
 	token := c.Param("token")
 
@@ -342,11 +507,14 @@ func (h *QuizHandler) SubmitAnswer(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+
+	// Если это групповая сессия — обновляем результат в топе
+	_ = h.quizSvc.UpdateGroupResult(c.Request.Context(), token)
+
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
 // ── POST /api/sessions/:token/finish ─────────────────────────────────────────
-
 func (h *QuizHandler) FinishSession(c *gin.Context) {
 	token := c.Param("token")
 	session, err := h.quizSvc.FinishSession(c.Request.Context(), token)
@@ -354,11 +522,14 @@ func (h *QuizHandler) FinishSession(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+
+	// Если это групповая сессия — финализируем результат в топе
+	_ = h.quizSvc.FinalizeGroupResult(c.Request.Context(), token)
+
 	c.JSON(http.StatusOK, session)
 }
 
 // ── GET /api/quizzes/:id/sessions/:sessionId ─────────────────────────────────
-
 func (h *QuizHandler) SessionDetails(c *gin.Context) {
 	userID := mustUserID(c)
 	quizID, err := uuid.Parse(c.Param("id"))
@@ -404,7 +575,6 @@ func (h *QuizHandler) SessionDetails(c *gin.Context) {
 }
 
 // ── GET /api/quizzes/:id/stats.csv ───────────────────────────────────────────
-
 func (h *QuizHandler) StatsCSV(c *gin.Context) {
 	userID := mustUserID(c)
 	quizID, err := uuid.Parse(c.Param("id"))
@@ -420,7 +590,6 @@ func (h *QuizHandler) StatsCSV(c *gin.Context) {
 
 	c.Header("Content-Type", "text/csv; charset=utf-8")
 	c.Header("Content-Disposition", `attachment; filename="quiz-stats.csv"`)
-	// UTF-8 BOM for Excel
 	c.Writer.Write([]byte{0xEF, 0xBB, 0xBF})
 	w := csv.NewWriter(c.Writer)
 	defer w.Flush()
@@ -444,7 +613,6 @@ func (h *QuizHandler) StatsCSV(c *gin.Context) {
 }
 
 // ── GET /api/quizzes/:id/stats ────────────────────────────────────────────────
-
 func (h *QuizHandler) Stats(c *gin.Context) {
 	userID := mustUserID(c)
 	quizID, err := uuid.Parse(c.Param("id"))
@@ -462,7 +630,6 @@ func (h *QuizHandler) Stats(c *gin.Context) {
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
-
 func mustUserID(c *gin.Context) uuid.UUID {
 	return c.MustGet("user_id").(uuid.UUID)
 }
@@ -473,3 +640,14 @@ func atoi(s string, def int) int {
 	}
 	return def
 }
+
+func generateRandomCode(n int) string {
+	const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = chars[time.Now().UnixNano()%int64(len(chars))]
+	}
+	return string(b)
+}
+
+func ptr[T any](v T) *T { return &v }

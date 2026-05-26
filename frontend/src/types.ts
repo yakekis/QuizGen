@@ -2,6 +2,7 @@ export type UUID = string;
 
 export type QuestionType = 'single' | 'multiple' | 'true_false';
 export type QuizStatus = 'draft' | 'published' | 'archived';
+export type QuizMode = 'solo' | 'group';
 
 export interface User {
   id: UUID;
@@ -53,6 +54,8 @@ export interface Session {
   id: UUID;
   quiz_id: UUID;
   token: string;
+  mode: QuizMode;
+  group_session_id?: UUID;
   student_name: string;
   started_at: string | null;
   finished_at: string | null;
@@ -122,4 +125,67 @@ export interface GenerateRequest {
   language?: Language;
   blooms_level?: BloomsLevel;
   file?: File | null;
+}
+
+// ── Group Mode Types ──────────────────────────────────────────────────────
+
+export interface GroupSession {
+  id: UUID;
+  quiz_id: UUID;
+  created_by: UUID;
+  access_code: string;
+  max_participants: number;
+  start_time?: string;
+  end_time?: string;
+  is_active: boolean;
+  show_leaderboard: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateGroupSessionRequest {
+  max_participants: number;
+  start_in_minutes: number;
+  duration_minutes: number;
+  access_code?: string;
+  show_leaderboard: boolean;
+}
+
+export interface JoinGroupSessionRequest {
+  student_name: string;
+}
+
+export interface GroupSessionInfo {
+  access_code: string;
+  quiz_title: string;
+  is_active: boolean;
+  show_leaderboard: boolean;
+  max_participants: number;
+  start_time?: string;
+  starts_in?: number;
+  end_time?: string;
+  ends_in?: number;
+}
+
+export interface LeaderboardEntry {
+  rank: number;
+  student_name: string;
+  score: number;
+  total_questions: number;
+  completed_at?: string;
+}
+
+export interface LeaderboardResponse {
+  updated_at: string;
+  entries: LeaderboardEntry[];
+}
+
+export interface JoinGroupResponse {
+  status: 'waiting' | 'started';
+  starts_in?: number;
+  session_id?: UUID;
+  quiz_id?: UUID;
+  session_token?: string;
+  ends_in?: number;
+  show_leaderboard?: boolean;
 }

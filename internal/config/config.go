@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -17,6 +18,7 @@ type Config struct {
 	RateLimit RateLimitConfig
 	Upload    UploadConfig
 	Session   SessionConfig
+	CORS      CORSConfig
 }
 
 type AppConfig struct {
@@ -67,6 +69,11 @@ type SessionConfig struct {
 	TTL time.Duration
 }
 
+type CORSConfig struct {
+	AllowedOrigins   []string
+	AllowCredentials bool
+}
+
 // Load reads .env (if present) then environment variables.
 func Load() (*Config, error) {
 	// Best-effort: load .env file (ignored in production where env is set externally)
@@ -112,6 +119,12 @@ func Load() (*Config, error) {
 		TTL: time.Duration(sessionTTLHours) * time.Hour,
 	}
 
+	// CORS config
+	cfg.CORS = CORSConfig{
+		AllowedOrigins:   getEnvSlice("CORS_ALLOWED_ORIGINS", ","),
+		AllowCredentials: getEnvBool("CORS_ALLOW_CREDENTIALS", true),
+	}
+
 	return cfg, nil
 }
 
@@ -126,6 +139,31 @@ func getEnvInt(key string, fallback int) int {
 	if v := os.Getenv(key); v != "" {
 		if i, err := strconv.Atoi(v); err == nil {
 			return i
+		}
+	}
+	return fallback
+}
+
+// ← НОВЫЕ ХЕЛПЕРЫ ДЛЯ CORS
+func getEnvSlice(key, sep string) []string {
+	if v := os.Getenv(key); v != "" {
+		parts := strings.Split(v, sep)
+		result := make([]string, 0, len(parts))
+		for _, p := range parts {
+			trimmed := strings.TrimSpace(p)
+			if trimmed != "" {
+				result = append(result, trimmed)
+			}
+		}
+		return result
+	}
+	return []string{}
+}
+
+func getEnvBool(key string, fallback bool) bool {
+	if v := os.Getenv(key); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			return b
 		}
 	}
 	return fallback

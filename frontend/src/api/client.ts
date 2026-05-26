@@ -6,6 +6,12 @@ import type {
   Question,
   Session,
   SessionDetails,
+  GroupSession,
+  CreateGroupSessionRequest,
+  JoinGroupSessionRequest,
+  GroupSessionInfo,
+  LeaderboardResponse,
+  JoinGroupResponse,
 } from '../types';
 
 const TOKEN_KEY = 'quizgen.token';
@@ -85,7 +91,7 @@ export const api = {
     request<SessionDetails>(`/api/quizzes/${quizId}/sessions/${sessionId}`),
 
   regenerateQuestion: (quizId: string, questionId: string) =>
-    request<import('../types').Question>(`/api/quizzes/${quizId}/questions/${questionId}/regenerate`, {
+    request<Question>(`/api/quizzes/${quizId}/questions/${questionId}/regenerate`, {
       method: 'POST',
     }),
 
@@ -121,6 +127,31 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ student_name: studentName }),
     }),
+
+  // ── Group Sessions (teacher) ───────────────────
+  createGroupSession: (quizId: string, req: CreateGroupSessionRequest) =>
+    request<GroupSession>(`/api/quizzes/${quizId}/group-sessions`, {
+      method: 'POST',
+      body: JSON.stringify(req),
+    }),
+
+  finishGroupSession: (accessCode: string) =>
+    request<{ status: string }>(`/api/group/${accessCode}/finish`, {
+      method: 'POST',
+    }),
+
+  // ── Group Sessions (student, public) ───────────
+  getGroupSessionInfo: (accessCode: string) =>
+    request<GroupSessionInfo>(`/api/group/${accessCode}/info`),
+
+  joinGroupSession: (accessCode: string, req: JoinGroupSessionRequest) =>
+    request<JoinGroupResponse>(`/api/group/${accessCode}/join`, {
+      method: 'POST',
+      body: JSON.stringify(req),
+    }),
+
+  getLeaderboard: (accessCode: string) =>
+    request<LeaderboardResponse>(`/api/group/${accessCode}/leaderboard`),
 
   // ── Session (student, public) ──────────────────
   getSession: (token: string) =>

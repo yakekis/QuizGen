@@ -35,7 +35,7 @@ type Quiz struct {
 	Grade            string     `json:"grade" db:"grade"`
 	Topic            string     `json:"topic" db:"topic"`
 	Description      string     `json:"description" db:"description"`
-	SourceText       string     `json:"-" db:"source_text"` // never expose to public
+	SourceText       string     `json:"-" db:"source_text"`
 	SourceFilename   string     `json:"source_filename" db:"source_filename"`
 	TimeLimitSecs    *int       `json:"time_limit_secs" db:"time_limit_secs"`
 	AttemptLimit     int        `json:"attempt_limit" db:"attempt_limit"`
@@ -83,16 +83,25 @@ type Answer struct {
 
 // ── Quiz Session ──────────────────────────────────────────────────────────────
 
+type QuizMode string
+
+const (
+	ModeSolo  QuizMode = "solo"
+	ModeGroup QuizMode = "group"
+)
+
 type QuizSession struct {
-	ID          uuid.UUID  `json:"id" db:"id"`
-	QuizID      uuid.UUID  `json:"quiz_id" db:"quiz_id"`
-	Token       string     `json:"token" db:"token"`
-	StudentName string     `json:"student_name" db:"student_name"`
-	StartedAt   *time.Time `json:"started_at" db:"started_at"`
-	FinishedAt  *time.Time `json:"finished_at" db:"finished_at"`
-	Score       *float64   `json:"score" db:"score"`
-	AttemptNum  int        `json:"attempt_num" db:"attempt_num"`
-	CreatedAt   time.Time  `json:"created_at" db:"created_at"`
+	ID             uuid.UUID  `json:"id" db:"id"`
+	QuizID         uuid.UUID  `json:"quiz_id" db:"quiz_id"`
+	Token          string     `json:"token" db:"token"`
+	Mode           QuizMode   `json:"mode" db:"mode"`
+	GroupSessionID *uuid.UUID `json:"group_session_id,omitempty" db:"group_session_id"`
+	StudentName    string     `json:"student_name" db:"student_name"`
+	StartedAt      *time.Time `json:"started_at" db:"started_at"`
+	FinishedAt     *time.Time `json:"finished_at" db:"finished_at"`
+	Score          *float64   `json:"score" db:"score"`
+	AttemptNum     int        `json:"attempt_num" db:"attempt_num"`
+	CreatedAt      time.Time  `json:"created_at" db:"created_at"`
 }
 
 // ── Session Answer ────────────────────────────────────────────────────────────
@@ -106,9 +115,34 @@ type SessionAnswer struct {
 	AnsweredAt        time.Time   `json:"answered_at" db:"answered_at"`
 }
 
+// ── Group Quiz Session ────────────────────────────────────────────────────────
+
+type GroupQuizSession struct {
+	ID              uuid.UUID  `json:"id" db:"id"`
+	QuizID          uuid.UUID  `json:"quiz_id" db:"quiz_id"`
+	CreatedBy       uuid.UUID  `json:"created_by" db:"created_by"`
+	AccessCode      string     `json:"access_code" db:"access_code"`
+	MaxParticipants int        `json:"max_participants" db:"max_participants"`
+	StartTime       *time.Time `json:"start_time,omitempty" db:"start_time"`
+	EndTime         *time.Time `json:"end_time,omitempty" db:"end_time"`
+	IsActive        bool       `json:"is_active" db:"is_active"`
+	ShowLeaderboard bool       `json:"show_leaderboard" db:"show_leaderboard"`
+	CreatedAt       time.Time  `json:"created_at" db:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at" db:"updated_at"`
+}
+
+type GroupQuizResult struct {
+	ID             uuid.UUID  `json:"id" db:"id"`
+	GroupSessionID uuid.UUID  `json:"group_session_id" db:"group_session_id"`
+	StudentName    string     `json:"student_name" db:"student_name"`
+	Score          float64    `json:"score" db:"score"`
+	TotalQuestions int        `json:"total_questions" db:"total_questions"`
+	CompletedAt    *time.Time `json:"completed_at,omitempty" db:"completed_at"`
+	Rank           int        `json:"rank,omitempty" db:"rank"`
+}
+
 // ── DTOs ─────────────────────────────────────────────────────────────────────
 
-// GenerateQuizRequest is the payload sent by the teacher.
 type GenerateQuizRequest struct {
 	Subject       string         `json:"subject" binding:"required"`
 	Grade         string         `json:"grade" binding:"required"`
@@ -117,16 +151,13 @@ type GenerateQuizRequest struct {
 	QuestionTypes []QuestionType `json:"question_types"`
 	TimeLimitSecs *int           `json:"time_limit_secs"`
 	AttemptLimit  int            `json:"attempt_limit"`
-	// New tuning parameters
-	Difficulty  string `json:"difficulty"`   // easy | medium | hard | mixed
-	Tone        string `json:"tone"`         // formal | playful | neutral
-	Language    string `json:"language"`     // ru | en | ...
-	BloomsLevel string `json:"blooms_level"` // remember | understand | apply | analyze | evaluate | create
-	// SourceText is set internally after file parsing
-	SourceText string `json:"-"`
+	Difficulty    string         `json:"difficulty"`
+	Tone          string         `json:"tone"`
+	Language      string         `json:"language"`
+	BloomsLevel   string         `json:"blooms_level"`
+	SourceText    string         `json:"-"`
 }
 
-// GeneratedQuiz is what the LLM returns (parsed JSON).
 type GeneratedQuestion struct {
 	Text        string `json:"text"`
 	Type        string `json:"type"`
@@ -142,7 +173,6 @@ type GeneratedQuiz struct {
 	Questions []GeneratedQuestion `json:"questions"`
 }
 
-// QuizStats is returned to the teacher after the quiz runs.
 type QuizStats struct {
 	QuizID        uuid.UUID      `json:"quiz_id"`
 	Title         string         `json:"title"`
@@ -153,7 +183,6 @@ type QuizStats struct {
 	Sessions      []SessionStat  `json:"sessions"`
 }
 
-// SessionStat — одна попытка ученика, отображаемая в статистике учителя.
 type SessionStat struct {
 	SessionID   uuid.UUID  `json:"session_id"`
 	StudentName string     `json:"student_name"`
@@ -170,7 +199,6 @@ type QuestionStat struct {
 	TotalCount   int       `json:"total_count"`
 }
 
-// RegisterRequest / LoginRequest
 type RegisterRequest struct {
 	Email    string `json:"email" binding:"required,email"`
 	Name     string `json:"name" binding:"required"`
@@ -185,4 +213,26 @@ type LoginRequest struct {
 type AuthResponse struct {
 	Token string `json:"token"`
 	User  User   `json:"user"`
+}
+
+// ── Group Mode Requests ──────────────────────────────────────────────────────
+
+type CreateGroupSessionRequest struct {
+	MaxParticipants int    `json:"max_participants" binding:"min=1,max=100"`
+	StartInMinutes  int    `json:"start_in_minutes" binding:"min=0"`
+	DurationMinutes int    `json:"duration_minutes" binding:"min=1"`
+	AccessCode      string `json:"access_code" binding:"omitempty,alphanum,len=6"`
+	ShowLeaderboard bool   `json:"show_leaderboard"`
+}
+
+type JoinGroupSessionRequest struct {
+	StudentName string `json:"student_name" binding:"required,min=2,max=50"`
+}
+
+type LeaderboardEntry struct {
+	Rank           int        `json:"rank"`
+	StudentName    string     `json:"student_name"`
+	Score          float64    `json:"score"`
+	TotalQuestions int        `json:"total_questions"`
+	CompletedAt    *time.Time `json:"completed_at,omitempty"`
 }
