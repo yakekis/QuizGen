@@ -202,6 +202,12 @@ func streamSSE(c *gin.Context, ch <-chan service.LiveEvent, snapshot service.Liv
 	h.Set("X-Accel-Buffering", "no") // disable proxy buffering (nginx/cloudflared)
 	c.Writer.WriteHeader(http.StatusOK)
 
+	// Снимаем дедлайн записи именно для этого ответа: иначе server.WriteTimeout
+	// (120 c) принудительно рвёт долгоживущий SSE-стрим, и игра «переподключается»
+	// посреди раунда. Для обычных эндпоинтов таймаут остаётся в силе.
+	rc := http.NewResponseController(c.Writer)
+	_ = rc.SetWriteDeadline(time.Time{})
+
 	writeEvent(c, flusher, snapshot)
 
 	ctx := c.Request.Context()
