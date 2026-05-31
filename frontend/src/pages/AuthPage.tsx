@@ -36,10 +36,10 @@ export function AuthPage() {
     <div className="flex min-h-[80vh] items-center justify-center px-4">
       <div className="w-full max-w-md animate-fade-in">
         <div className="mb-8 text-center">
-          <div className="mx-auto mb-4 grid h-14 w-14 place-items-center rounded-2xl bg-gradient-to-br from-brand-500 to-brand-700 text-white shadow-hover">
+          <div className="mx-auto mb-4 grid h-14 w-14 place-items-center rounded-2xl bg-sber text-white shadow-hover">
             <svg width="26" height="26" viewBox="0 0 24 24" fill="currentColor"><path d="M9 11H7v2h2v-2zm4 0h-2v2h2v-2zm4 0h-2v2h2v-2zm2-7h-1V2h-2v2H8V2H6v2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 16H5V9h14v11z"/></svg>
           </div>
-          <h1 className="text-2xl font-bold text-slate-900">QuizGen</h1>
+          <h1 className="text-2xl font-bold text-slate-900">QuizGen <span className="text-slate-300 font-normal">×</span> <span className="text-brand-600">СберОбразование</span></h1>
           <p className="mt-1 text-sm text-slate-500">Сгенерируйте викторину за минуту</p>
         </div>
 
@@ -99,6 +99,17 @@ export function AuthPage() {
               {mode === 'login' ? 'Войти' : 'Создать аккаунт'}
             </Button>
           </form>
+        </div>
+
+        <div className="mt-4 text-center text-sm text-slate-500">
+          Вы ученик?{' '}
+          <button
+            type="button"
+            onClick={() => nav('/play/live')}
+            className="font-medium text-brand-700 hover:underline"
+          >
+            Присоединиться к игре по PIN →
+          </button>
         </div>
       </div>
     </div>

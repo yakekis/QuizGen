@@ -12,10 +12,10 @@ export function Layout({ children }: { children: ReactNode }) {
       <header className="sticky top-0 z-40 border-b border-slate-200 bg-white/80 backdrop-blur">
         <div className="container-app flex h-16 items-center justify-between">
           <Link to="/" className="flex items-center gap-2 font-bold text-slate-900">
-            <span className="grid h-9 w-9 place-items-center rounded-xl bg-gradient-to-br from-brand-500 to-brand-700 text-white shadow-sm">
+            <span className="grid h-9 w-9 place-items-center rounded-xl bg-sber text-white shadow-sm">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M9 11H7v2h2v-2zm4 0h-2v2h2v-2zm4 0h-2v2h2v-2zm2-7h-1V2h-2v2H8V2H6v2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 16H5V9h14v11z"/></svg>
             </span>
-            <span className="text-lg">QuizGen</span>
+            <span className="text-lg">QuizGen <span className="text-slate-300 font-normal">×</span> <span className="text-brand-600">СберОбразование</span></span>
           </Link>
 
           {user && (
@@ -23,9 +23,9 @@ export function Layout({ children }: { children: ReactNode }) {
               <NavLink to="/" end className={navItem}>Мои квизы</NavLink>
               <NavLink to="/generate" className={navItem}>Создать</NavLink>
               <div className="mx-2 hidden h-6 w-px bg-slate-200 sm:block" />
-              <span className="hidden text-sm text-slate-600 sm:inline">
+              <NavLink to="/profile" className={navItem} title="Профиль">
                 {user.name || user.email}
-              </span>
+              </NavLink>
               <Button
                 variant="ghost"
                 size="sm"
@@ -45,7 +45,7 @@ export function Layout({ children }: { children: ReactNode }) {
 
       <footer className="border-t border-slate-200 bg-white">
         <div className="container-app py-4 text-center text-xs text-slate-500">
-          QuizGen · MVP генератор викторин
+          QuizGen × СберОбразование · MVP генератор викторин
         </div>
       </footer>
     </div>

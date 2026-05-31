@@ -77,6 +77,58 @@ func (s *AuthService) Login(ctx context.Context, req *models.LoginRequest) (*mod
 	return &models.AuthResponse{Token: token, User: *user}, nil
 }
 
+// GetProfile возвращает текущего пользователя по ID.
+func (s *AuthService) GetProfile(ctx context.Context, userID uuid.UUID) (*models.User, error) {
+	user, err := s.userRepo.GetByID(ctx, userID)
+	if err != nil || user == nil {
+		return nil, fmt.Errorf("user not found")
+	}
+	return user, nil
+}
+
+// UpdateProfile меняет имя/email и (опционально) пароль текущего пользователя.
+func (s *AuthService) UpdateProfile(ctx context.Context, userID uuid.UUID, req *models.UpdateProfileRequest) (*models.User, error) {
+	user, err := s.userRepo.GetByID(ctx, userID)
+	if err != nil || user == nil {
+		return nil, fmt.Errorf("user not found")
+	}
+
+	// Email должен оставаться уникальным.
+	if req.Email != user.Email {
+		existing, err := s.userRepo.GetByEmail(ctx, req.Email)
+		if err != nil {
+			return nil, err
+		}
+		if existing != nil && existing.ID != userID {
+			return nil, fmt.Errorf("email already registered")
+		}
+	}
+
+	// Смена пароля — только при верном текущем пароле.
+	if req.NewPassword != "" {
+		if len(req.NewPassword) < 8 {
+			return nil, fmt.Errorf("new password must be at least 8 characters")
+		}
+		if !CheckPassword(user.PasswordHash, req.CurrentPassword) {
+			return nil, fmt.Errorf("current password is incorrect")
+		}
+		hash, err := HashPassword(req.NewPassword)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.userRepo.UpdatePassword(ctx, userID, hash); err != nil {
+			return nil, err
+		}
+	}
+
+	user.Name = req.Name
+	user.Email = req.Email
+	if err := s.userRepo.UpdateProfile(ctx, user); err != nil {
+		return nil, err
+	}
+	return user, nil
+}
+
 // VerifyToken validates a token and returns the user ID.
 func (s *AuthService) VerifyToken(token string) (uuid.UUID, error) {
 	parts := strings.Split(token, ".")

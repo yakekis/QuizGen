@@ -69,16 +69,14 @@ RESPOND ONLY WITH VALID JSON (no markdown, no preamble):
 }
 `, qType, quizCtx, oldQuestion, qType)
 
-	body, err := s.callAPI(ctx, prompt)
+	body, err := s.callAPI(ctx, prompt, 1500)
 	if err != nil {
 		return nil, err
 	}
 	body = sanitizeUTF8(body)
 	body = strings.TrimSpace(body)
-	body = strings.TrimPrefix(body, "```json")
-	body = strings.TrimPrefix(body, "```")
-	body = strings.TrimSuffix(body, "```")
-	body = strings.TrimSpace(body)
+	body = stripCodeFences(body)
+	body = extractJSONObject(body)
 	body = stripTrailingCommas(body)
 
 	var gq models.GeneratedQuestion
@@ -95,7 +93,11 @@ RESPOND ONLY WITH VALID JSON (no markdown, no preamble):
 func (s *LLMService) GenerateQuiz(ctx context.Context, req *models.GenerateQuizRequest) (*models.GeneratedQuiz, error) {
 	prompt := s.buildPrompt(req)
 
-	body, err := s.callAPI(ctx, prompt)
+	// Масштабируем лимит токенов под число вопросов, иначе ответ обрезается
+	// на середине JSON и парсинг падает (особенно при >10 вопросах).
+	maxTokens := 2000 + req.QuestionCount*500
+
+	body, err := s.callAPI(ctx, prompt, maxTokens)
 	if err != nil {
 		return nil, fmt.Errorf("llm call: %w", err)
 	}
@@ -136,6 +138,8 @@ func (s *LLMService) buildPrompt(req *models.GenerateQuizRequest) string {
 		blooms = "mixed"
 	}
 
+	hasSource := strings.TrimSpace(req.SourceText) != ""
+
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf(`You are an expert teacher creating a quiz for school students.
 Write ALL content (title, questions, answers, explanations) STRICTLY in language: %s.
@@ -153,12 +157,23 @@ CONTEXT:
 
 `, lang, req.QuestionCount, req.Subject, req.Grade, req.Topic, strings.Join(typeStr, ", "), difficulty, tone, blooms))
 
-	if req.SourceText != "" {
+	if hasSource {
 		text := req.SourceText
-		if len(text) > 6000 {
-			text = text[:6000] + "\n...[truncated]"
+		if len(text) > 12000 {
+			text = text[:12000] + "\n...[truncated]"
 		}
-		sb.WriteString(fmt.Sprintf("SOURCE MATERIAL (base all questions on this):\n---\n%s\n---\n\n", text))
+		sb.WriteString(fmt.Sprintf(`SOURCE MATERIAL — THIS IS THE PRIMARY BASIS FOR THE QUIZ.
+The teacher uploaded the document below. EVERY question, answer and distractor MUST be
+derived from the facts, concepts and wording found in this material. Treat the Subject,
+Grade and Topic above only as framing — the actual content comes from this document.
+Do NOT invent facts that are absent from it; do NOT pull in outside knowledge that
+contradicts or is unrelated to it. If the material is shorter than needed, stay within
+its scope and rephrase rather than fabricate.
+---
+%s
+---
+
+`, text))
 	}
 
 	sb.WriteString(`INSTRUCTIONS:
@@ -169,7 +184,15 @@ CONTEXT:
 5. Distractors must be believable — typical errors, misconceptions, or close-but-wrong facts.
 6. Add a brief explanation (1-2 sentences) for why the correct answer is right.
 7. Respect requested difficulty (easy/medium/hard/mixed) and Bloom's cognitive level.
-8. Respect tone of voice: "formal" — academic, "playful" — friendly, "neutral" — balanced.
+8. Respect tone of voice: "formal" — academic, "playful" — friendly, "neutral" — balanced.`)
+
+	if hasSource {
+		sb.WriteString("\n9. CRITICAL: base every question strictly on the SOURCE MATERIAL above. " +
+			"Questions must be answerable from that document alone; distractors should reflect " +
+			"misreadings of it, not unrelated trivia.")
+	}
+
+	sb.WriteString(`
 
 RESPOND ONLY WITH VALID JSON in this exact schema — no markdown, no preamble:
 {
@@ -238,18 +261,23 @@ type openAIResponse struct {
 	} `json:"error"`
 }
 
-func (s *LLMService) callAPI(ctx context.Context, prompt string) (string, error) {
+func (s *LLMService) callAPI(ctx context.Context, prompt string, maxTokens int) (string, error) {
 	provider := strings.ToLower(s.cfg.Provider)
 
+	if maxTokens < 1024 {
+		maxTokens = 1024
+	}
+
 	if provider == "gigachat" {
-		return s.callGigaChat(ctx, prompt)
+		return s.callGigaChat(ctx, prompt, clampTokens(maxTokens, 16384))
 	}
 
 	// Если выбран OpenAI/DeepSeek провайдер
 	if provider == "openai" {
 		reqBody := openAIRequest{
-			Model:    s.cfg.Model,
-			Messages: []openAIMessage{{Role: "user", Content: prompt}},
+			Model:     s.cfg.Model,
+			Messages:  []openAIMessage{{Role: "user", Content: prompt}},
+			MaxTokens: clampTokens(maxTokens, 16384),
 		}
 		data, err := json.Marshal(reqBody)
 		if err != nil {
@@ -296,7 +324,7 @@ func (s *LLMService) callAPI(ctx context.Context, prompt string) (string, error)
 	// Дефолтная логика Anthropic Claude
 	reqBody := anthropicRequest{
 		Model:     s.cfg.Model,
-		MaxTokens: 4096,
+		MaxTokens: clampTokens(maxTokens, 8192),
 		Messages:  []anthropicMessage{{Role: "user", Content: prompt}},
 	}
 
@@ -444,7 +472,7 @@ func (s *LLMService) gigaToken_(ctx context.Context) (string, error) {
 	return s.gigaToken, nil
 }
 
-func (s *LLMService) callGigaChat(ctx context.Context, prompt string) (string, error) {
+func (s *LLMService) callGigaChat(ctx context.Context, prompt string, maxTokens int) (string, error) {
 	token, err := s.gigaToken_(ctx)
 	if err != nil {
 		return "", err
@@ -453,7 +481,7 @@ func (s *LLMService) callGigaChat(ctx context.Context, prompt string) (string, e
 	reqBody := openAIRequest{
 		Model:       s.gigaModel(),
 		Messages:    []openAIMessage{{Role: "user", Content: prompt}},
-		MaxTokens:   4096,
+		MaxTokens:   maxTokens,
 		Temperature: 0.3,
 	}
 	data, err := json.Marshal(reqBody)
@@ -507,20 +535,198 @@ func parseGeneratedQuiz(raw string) (*models.GeneratedQuiz, error) {
 	// которые Postgres отвергает как невалидный UTF-8. Чистим перед парсингом.
 	raw = sanitizeUTF8(raw)
 	raw = strings.TrimSpace(raw)
-	raw = strings.TrimPrefix(raw, "```json")
-	raw = strings.TrimPrefix(raw, "```")
-	raw = strings.TrimSuffix(raw, "```")
-	raw = strings.TrimSpace(raw)
-	raw = stripTrailingCommas(raw)
+	raw = stripCodeFences(raw)
+	// Отрезаем любую преамбулу/мусор до первой `{` и (по возможности)
+	// после соответствующей `}` — это устраняет ошибки вида
+	// «invalid character '/' looking for beginning of value».
+	raw = extractJSONObject(raw)
+	cleaned := stripTrailingCommas(raw)
 
 	var quiz models.GeneratedQuiz
-	if err := json.Unmarshal([]byte(raw), &quiz); err != nil {
+	if err := json.Unmarshal([]byte(cleaned), &quiz); err == nil && len(quiz.Questions) > 0 {
+		return &quiz, nil
+	}
+
+	// Ответ мог быть обрезан по лимиту токенов (частый случай при большом
+	// числе вопросов) — JSON невалиден целиком, но отдельные вопросы внутри
+	// массива завершены. Спасаем все полностью разобранные вопросы.
+	if salvaged := salvageQuiz(cleaned); salvaged != nil && len(salvaged.Questions) > 0 {
+		return salvaged, nil
+	}
+
+	// Возвращаем осмысленную ошибку из обычного парсинга.
+	if err := json.Unmarshal([]byte(cleaned), &quiz); err != nil {
 		return nil, err
 	}
-	if len(quiz.Questions) == 0 {
-		return nil, fmt.Errorf("no questions in generated quiz")
+	return nil, fmt.Errorf("no questions in generated quiz")
+}
+
+// salvageQuiz вытаскивает заголовок и все полностью завершённые объекты-вопросы
+// из (возможно) усечённого JSON-ответа модели.
+func salvageQuiz(raw string) *models.GeneratedQuiz {
+	qi := strings.Index(raw, `"questions"`)
+	if qi < 0 {
+		return nil
 	}
-	return &quiz, nil
+	br := strings.IndexByte(raw[qi:], '[')
+	if br < 0 {
+		return nil
+	}
+	objs := extractObjects(raw[qi+br+1:])
+
+	quiz := &models.GeneratedQuiz{Title: extractStringField(raw, "title")}
+	for _, o := range objs {
+		var gq models.GeneratedQuestion
+		if err := json.Unmarshal([]byte(stripTrailingCommas(o)), &gq); err == nil {
+			if strings.TrimSpace(gq.Text) != "" && len(gq.Answers) > 0 {
+				quiz.Questions = append(quiz.Questions, gq)
+			}
+		}
+	}
+	if len(quiz.Questions) == 0 {
+		return nil
+	}
+	return quiz
+}
+
+// extractObjects собирает все верхнеуровневые объекты `{...}` из тела массива,
+// корректно пропуская строки. Незакрытый (усечённый) последний объект отбрасывается.
+func extractObjects(s string) []string {
+	var objs []string
+	depth, objStart := 0, -1
+	inString, escape := false, false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if inString {
+			switch {
+			case escape:
+				escape = false
+			case c == '\\':
+				escape = true
+			case c == '"':
+				inString = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inString = true
+		case '{':
+			if depth == 0 {
+				objStart = i
+			}
+			depth++
+		case '}':
+			depth--
+			if depth == 0 && objStart >= 0 {
+				objs = append(objs, s[objStart:i+1])
+				objStart = -1
+			}
+		case ']':
+			if depth == 0 {
+				return objs // конец массива questions
+			}
+		}
+	}
+	return objs
+}
+
+// extractJSONObject обрезает строку до первой `{` и, если найден баланс скобок,
+// до соответствующей закрывающей `}`. При усечении возвращает хвост от первой `{`.
+func extractJSONObject(s string) string {
+	start := strings.IndexByte(s, '{')
+	if start < 0 {
+		return s
+	}
+	depth := 0
+	inString, escape := false, false
+	for i := start; i < len(s); i++ {
+		c := s[i]
+		if inString {
+			switch {
+			case escape:
+				escape = false
+			case c == '\\':
+				escape = true
+			case c == '"':
+				inString = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inString = true
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return s[start : i+1]
+			}
+		}
+	}
+	return s[start:]
+}
+
+// extractStringField извлекает значение строкового поля верхнего уровня (best-effort).
+func extractStringField(s, key string) string {
+	idx := strings.Index(s, `"`+key+`"`)
+	if idx < 0 {
+		return ""
+	}
+	rest := s[idx+len(key)+2:]
+	if c := strings.IndexByte(rest, ':'); c >= 0 {
+		rest = rest[c+1:]
+	} else {
+		return ""
+	}
+	q := strings.IndexByte(rest, '"')
+	if q < 0 {
+		return ""
+	}
+	rest = rest[q+1:]
+	var b strings.Builder
+	escape := false
+	for i := 0; i < len(rest); i++ {
+		ch := rest[i]
+		if escape {
+			b.WriteByte(ch)
+			escape = false
+			continue
+		}
+		if ch == '\\' {
+			b.WriteByte(ch)
+			escape = true
+			continue
+		}
+		if ch == '"' {
+			break
+		}
+		b.WriteByte(ch)
+	}
+	var out string
+	if err := json.Unmarshal([]byte(`"`+b.String()+`"`), &out); err == nil {
+		return out
+	}
+	return b.String()
+}
+
+// stripCodeFences снимает markdown-обёртку ```json ... ``` вокруг ответа.
+func stripCodeFences(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "```json")
+	s = strings.TrimPrefix(s, "```JSON")
+	s = strings.TrimPrefix(s, "```")
+	s = strings.TrimSuffix(s, "```")
+	return strings.TrimSpace(s)
+}
+
+// clampTokens ограничивает запрошенный лимит токенов сверху значением max.
+func clampTokens(n, max int) int {
+	if n > max {
+		return max
+	}
+	return n
 }
 
 // stripTrailingCommas удаляет лишние запятые перед `}` или `]`,

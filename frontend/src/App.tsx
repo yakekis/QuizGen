@@ -7,10 +7,13 @@ import { QuizListPage } from './pages/QuizListPage';
 import { QuizGeneratePage } from './pages/QuizGeneratePage';
 import { QuizEditorPage } from './pages/QuizEditorPage';
 import { QuizStatsPage } from './pages/QuizStatsPage';
+import { ProfilePage } from './pages/ProfilePage';
 import { SessionDetailsPage } from './pages/SessionDetailsPage';
 import { QuizPrintPage } from './pages/QuizPrintPage';
 import { PlayerPage } from './pages/PlayerPage';
 import { GroupJoinPage } from './pages/GroupJoinPage'; // ← ДОБАВИТЬ ЭТУ СТРОКУ
+import { LiveHostPage } from './pages/LiveHostPage';
+import { LivePlayPage } from './pages/LivePlayPage';
 import { PageSpinner } from './components/Spinner';
 
 function Private({ children }: { children: JSX.Element }) {
@@ -34,6 +37,10 @@ export default function App() {
         <AuthProvider>
           <Routes>
             <Route path="/auth" element={<AuthPage />} />
+            {/* Live (Kahoot-style) game — static "live" segments outrank /play/:token in RR v6 */}
+            <Route path="/play/live" element={<LivePlayPage />} />
+            <Route path="/play/live/:pin" element={<LivePlayPage />} />
+            <Route path="/host/:pin" element={<LiveHostPage />} />
             <Route path="/play/:token" element={<PlayerShell />} />
             <Route path="/group/:accessCode" element={<GroupJoinPage />} /> {/* ← ДОБАВИТЬ ЭТУ СТРОКУ */}
 
@@ -44,6 +51,7 @@ export default function App() {
                   <Layout>
                     <Routes>
                       <Route path="/" element={<QuizListPage />} />
+                      <Route path="/profile" element={<ProfilePage />} />
                       <Route path="/generate" element={<QuizGeneratePage />} />
                       <Route path="/quizzes/:id" element={<QuizEditorPage />} />
                       <Route path="/quizzes/:id/stats" element={<QuizStatsPage />} />

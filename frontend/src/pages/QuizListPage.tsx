@@ -27,6 +27,19 @@ export function QuizListPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const [launchingId, setLaunchingId] = useState<string | null>(null);
+
+  const onLaunchLive = async (id: string) => {
+    setLaunchingId(id);
+    try {
+      const res = await api.createLiveGame(id);
+      nav(`/host/${res.pin}`, { state: { hostToken: res.host_token } });
+    } catch (e: any) {
+      toast.error(e.message || 'Не удалось запустить игру');
+      setLaunchingId(null);
+    }
+  };
+
   const onDelete = async (id: string) => {
     if (!confirm('Удалить квиз без возможности восстановления?')) return;
     try {
@@ -83,6 +96,7 @@ export function QuizListPage() {
               </dl>
 
               <div className="mt-5 flex flex-wrap items-center gap-2">
+                <Button size="sm" onClick={() => onLaunchLive(q.id)} loading={launchingId === q.id}>🎮 Играть</Button>
                 <Button size="sm" variant="secondary" onClick={() => nav(`/quizzes/${q.id}`)}>Редактировать</Button>
                 <Button size="sm" variant="secondary" onClick={() => nav(`/quizzes/${q.id}/stats`)}>Статистика</Button>
                 <Button size="sm" variant="ghost" onClick={() => onDelete(q.id)}>

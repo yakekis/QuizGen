@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"github.com/quizgen/quizgen/internal/models"
 	"github.com/quizgen/quizgen/internal/service"
@@ -47,4 +48,33 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, resp)
+}
+
+// GET /api/me
+func (h *AuthHandler) Me(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+	user, err := h.authSvc.GetProfile(c.Request.Context(), userID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, user)
+}
+
+// PUT /api/me
+func (h *AuthHandler) UpdateMe(c *gin.Context) {
+	userID := c.MustGet("user_id").(uuid.UUID)
+
+	var req models.UpdateProfileRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	user, err := h.authSvc.UpdateProfile(c.Request.Context(), userID, &req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, user)
 }

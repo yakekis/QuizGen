@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -104,7 +105,63 @@ func (s *QuizService) CreatePersonalLink(ctx context.Context, quizID uuid.UUID, 
 	return session, nil
 }
 
-func (s *QuizService) SubmitAnswer(ctx context.Context, sessionToken string, questionID uuid.UUID, selectedIDs []uuid.UUID) error {
+// AttemptsUsed возвращает число завершённых попыток ученика по этому квизу.
+func (s *QuizService) AttemptsUsed(ctx context.Context, quizID uuid.UUID, studentName string) int {
+	if studentName == "" {
+		return 0
+	}
+	count, err := s.quizRepo.CountAttempts(ctx, quizID, studentName)
+	if err != nil {
+		return 0
+	}
+	return count
+}
+
+// RetryAttempt создаёт новую попытку (новую сессию-ссылку) для того же ученика,
+// если лимит попыток ещё не исчерпан. attempt_limit == 0 трактуется как «без лимита».
+func (s *QuizService) RetryAttempt(ctx context.Context, token string) (*models.QuizSession, error) {
+	session, err := s.quizRepo.GetSessionByToken(ctx, token)
+	if err != nil || session == nil {
+		return nil, fmt.Errorf("session not found")
+	}
+	if session.Mode == models.ModeGroup {
+		return nil, fmt.Errorf("retry not allowed for group sessions")
+	}
+	if strings.TrimSpace(session.StudentName) == "" {
+		return nil, fmt.Errorf("student is not identified")
+	}
+
+	quiz, err := s.quizRepo.GetByID(ctx, session.QuizID)
+	if err != nil || quiz == nil {
+		return nil, fmt.Errorf("quiz not found")
+	}
+
+	used, err := s.quizRepo.CountAttempts(ctx, session.QuizID, session.StudentName)
+	if err != nil {
+		return nil, err
+	}
+	if quiz.AttemptLimit > 0 && used >= quiz.AttemptLimit {
+		return nil, fmt.Errorf("attempt limit reached")
+	}
+
+	newToken, err := generateToken(16)
+	if err != nil {
+		return nil, err
+	}
+	newSession := &models.QuizSession{
+		QuizID:      session.QuizID,
+		Token:       newToken,
+		Mode:        models.ModeSolo,
+		StudentName: session.StudentName,
+		AttemptNum:  used + 1,
+	}
+	if err := s.quizRepo.CreateSession(ctx, newSession); err != nil {
+		return nil, err
+	}
+	return newSession, nil
+}
+
+func (s *QuizService) SubmitAnswer(ctx context.Context, sessionToken string, questionID uuid.UUID, selectedIDs []uuid.UUID, timeSpentMs int) error {
 	session, err := s.quizRepo.GetSessionByToken(ctx, sessionToken)
 	if err != nil || session == nil {
 		return fmt.Errorf("session not found")
@@ -129,14 +186,24 @@ func (s *QuizService) SubmitAnswer(ctx context.Context, sessionToken string, que
 		}
 	}
 
+	if timeSpentMs < 0 {
+		timeSpentMs = 0
+	}
 	ans := &models.SessionAnswer{
 		SessionID:         session.ID,
 		QuestionID:        questionID,
 		SelectedAnswerIDs: selectedIDs,
 		IsCorrect:         isCorrect,
+		TimeSpentMs:       timeSpentMs,
 		AnsweredAt:        time.Now(),
 	}
 	return s.quizRepo.SaveSessionAnswer(ctx, ans)
+}
+
+// RecordTabSwitch фиксирует, что ученик переключился с вкладки квиза,
+// и возвращает обновлённый счётчик для этой сессии.
+func (s *QuizService) RecordTabSwitch(ctx context.Context, token string) (int, error) {
+	return s.quizRepo.IncrementTabSwitches(ctx, token)
 }
 
 func (s *QuizService) FinishSession(ctx context.Context, token string) (*models.QuizSession, error) {
@@ -191,6 +258,15 @@ func (s *QuizService) RegenerateQuestion(ctx context.Context, quizID, questionID
 
 	quizCtx := fmt.Sprintf("Subject: %s; Grade: %s; Topic: %s; Title: %s",
 		quiz.Subject, quiz.Grade, quiz.Topic, quiz.Title)
+
+	// Если квиз был построен по загруженному материалу — даём его LLM,
+	// чтобы новый вопрос оставался в рамках того же источника.
+	if src := strings.TrimSpace(quiz.SourceText); src != "" {
+		if len(src) > 12000 {
+			src = src[:12000] + "\n...[truncated]"
+		}
+		quizCtx += fmt.Sprintf("\n\nSOURCE MATERIAL (base the new question strictly on this):\n---\n%s\n---", src)
+	}
 
 	gen, err := s.llm.RegenerateQuestion(ctx, quizCtx, old.Text, old.Type)
 	if err != nil {

@@ -53,6 +53,21 @@ func (r *UserRepository) GetByID(ctx context.Context, id uuid.UUID) (*models.Use
 	return u, err
 }
 
+// UpdateProfile обновляет имя и email пользователя.
+func (r *UserRepository) UpdateProfile(ctx context.Context, u *models.User) error {
+	return r.db.QueryRowContext(ctx, `
+		UPDATE users SET name=$1, email=$2 WHERE id=$3
+		RETURNING created_at, updated_at`,
+		u.Name, u.Email, u.ID,
+	).Scan(&u.CreatedAt, &u.UpdatedAt)
+}
+
+// UpdatePassword сохраняет новый хеш пароля.
+func (r *UserRepository) UpdatePassword(ctx context.Context, id uuid.UUID, passwordHash string) error {
+	_, err := r.db.ExecContext(ctx, `UPDATE users SET password_hash=$1 WHERE id=$2`, passwordHash, id)
+	return err
+}
+
 // ── Rate limiting ─────────────────────────────────────────────────────────────
 
 // IncrementRateLimit bumps the counter for the current window and returns the new count.

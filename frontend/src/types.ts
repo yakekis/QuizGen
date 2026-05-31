@@ -27,6 +27,7 @@ export interface Question {
   type: QuestionType;
   text: string;
   explanation: string;
+  image_url: string;
   time_limit_secs: number | null;
   answers: Answer[];
 }
@@ -61,6 +62,25 @@ export interface Session {
   finished_at: string | null;
   score: number | null;
   attempt_num: number;
+  tab_switches: number;
+}
+
+export interface OptionStat {
+  answer_id: UUID;
+  text: string;
+  is_correct: boolean;
+  selected_count: number;
+}
+
+export interface QuestionStat {
+  question_id: UUID;
+  text: string;
+  type: QuestionType;
+  position: number;
+  correct_count: number;
+  total_count: number;
+  avg_time_sec: number;
+  options: OptionStat[] | null;
 }
 
 export interface QuizStats {
@@ -69,13 +89,13 @@ export interface QuizStats {
   total_sessions: number;
   completed: number;
   avg_score: number;
-  questions: {
-    question_id: UUID;
-    text: string;
-    correct_count: number;
-    total_count: number;
-  }[];
+  questions: QuestionStat[];
   sessions: SessionStat[] | null;
+}
+
+export interface SessionAnswerBrief {
+  question_id: UUID;
+  is_correct: boolean | null;
 }
 
 export interface SessionStat {
@@ -85,6 +105,11 @@ export interface SessionStat {
   started_at: string | null;
   finished_at: string | null;
   attempt_num: number;
+  tab_switches: number;
+  correct_count: number;
+  answered_count: number;
+  total_time_ms: number;
+  answers: SessionAnswerBrief[] | null;
 }
 
 export interface SessionAnswer {
@@ -93,6 +118,7 @@ export interface SessionAnswer {
   question_id: UUID;
   selected_answer_ids: UUID[];
   is_correct: boolean | null;
+  time_spent_ms: number;
   answered_at: string;
 }
 
@@ -105,6 +131,22 @@ export interface SessionDetails {
 export interface AuthResponse {
   token: string;
   user: User;
+}
+
+export interface UpdateProfileRequest {
+  name: string;
+  email: string;
+  current_password?: string;
+  new_password?: string;
+}
+
+// Ответ GET /api/sessions/:token — сессия, вопросы и параметры квиза для плеера.
+export interface SessionLoad {
+  session: Session;
+  questions: Question[];
+  time_limit_secs: number | null;
+  attempt_limit: number;
+  attempts_used: number;
 }
 
 export type Difficulty = 'easy' | 'medium' | 'hard' | 'mixed';
@@ -178,6 +220,67 @@ export interface LeaderboardEntry {
 export interface LeaderboardResponse {
   updated_at: string;
   entries: LeaderboardEntry[];
+}
+
+// ── Live (Kahoot-style) Mode Types ────────────────────────────────────────
+
+export type LivePhase = 'lobby' | 'question' | 'reveal' | 'game_over';
+
+export interface LiveCreateResponse {
+  pin: string;
+  host_token: string;
+  quiz_title: string;
+  total: number;
+}
+
+export interface LiveJoinResponse {
+  player_id: string;
+  pin: string;
+  quiz_title: string;
+  name: string;
+}
+
+export interface LiveOption {
+  id: string;
+  text: string;
+  is_correct?: boolean;
+  count?: number;
+}
+
+export interface LiveLeaderRow {
+  rank: number;
+  name: string;
+  score: number;
+}
+
+export interface LiveYou {
+  correct?: boolean;
+  points?: number;
+  total_score: number;
+  rank: number;
+  streak?: number;
+  name?: string;
+}
+
+// Decoded `data` payload of a live SSE event (fields present depend on type).
+export interface LiveEvent {
+  pin?: string;
+  quiz_title?: string;
+  players?: string[];
+  count?: number;
+  total?: number;
+  index?: number;
+  text?: string;
+  type?: QuestionType;
+  time_limit?: number;
+  deadline_unix?: number;
+  options?: LiveOption[];
+  answered?: number | boolean;
+  correct_ids?: string[];
+  leaderboard?: LiveLeaderRow[];
+  is_last?: boolean;
+  you?: LiveYou;
+  podium?: LiveLeaderRow[];
 }
 
 export interface JoinGroupResponse {

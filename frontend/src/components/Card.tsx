@@ -6,13 +6,14 @@ interface CardProps {
   actions?: ReactNode;
   children: ReactNode;
   className?: string;
+  noPadding?: boolean;
 }
 
-export function Card({ title, subtitle, actions, children, className = '' }: CardProps) {
+export function Card({ title, subtitle, actions, children, className = '', noPadding = false }: CardProps) {
   return (
-    <section className={`surface p-6 sm:p-7 ${className}`}>
+    <section className={`surface overflow-hidden ${noPadding ? '' : 'p-6 sm:p-7'} ${className}`}>
       {(title || actions) && (
-        <header className="mb-5 flex items-start justify-between gap-4">
+        <header className={`flex items-start justify-between gap-4 ${noPadding ? 'p-6 pb-0 sm:p-7 sm:pb-0' : 'mb-5'}`}>
           <div>
             {title && <h2 className="text-lg font-semibold text-slate-900">{title}</h2>}
             {subtitle && <p className="mt-1 text-sm text-slate-500">{subtitle}</p>}

@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gofmt -w internal/service/live.go internal/handlers/live.go)",
+      "Bash(go build *)",
+      "Bash(go fmt *)",
+      "PowerShell(Get-Command *)",
+      "PowerShell(Test-Path *)",
+      "PowerShell($proj = \"C:\\\\Users\\\\User\\\\OneDrive\\\\Рабочий стол\\\\sberhack\\\\hakaton_sber_obr\"; docker run --rm -v \"${proj}:/app\" -w /app golang:1.22-alpine sh -c \"go build ./... && echo BUILD_OK\" 2>&1 | Select-Object -Last 40)",
+      "Bash(cat \"C:\\\\Users\\\\User\\\\.claude\\\\projects\\\\C--Users-User-OneDrive--------------sberhack-hakaton-sber-obr\\\\memory\\\\MEMORY.md\")",
+      "Bash(git -C \"C:\\\\Users\\\\User\\\\OneDrive\\\\Рабочий стол\\\\sberhack\\\\hakaton_sber_obr\" status)",
+      "Bash(echo \"EXIT: $?\")",
+      "PowerShell(go *)",
+      "Bash(node --version)",
+      "Bash(npm --version)",
+      "Read(//usr/local/go/bin/**)",
+      "Read(//c/Users/User/**)",
+      "Bash(go version *)"
+    ]
+  }
+}

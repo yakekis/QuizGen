@@ -7,6 +7,7 @@ interface AuthState {
   loading: boolean;
   login: (email: string, password: string) => Promise<void>;
   register: (email: string, name: string, password: string) => Promise<void>;
+  updateUser: (user: User) => void;
   logout: () => void;
 }
 
@@ -53,6 +54,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(r.user);
   };
 
+  const updateUser = (u: User) => {
+    saveUser(u);
+    setUser(u);
+  };
+
   const logout = () => {
     setToken(null);
     saveUser(null);
@@ -60,7 +66,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <Ctx.Provider value={{ user, loading, login, register, logout }}>
+    <Ctx.Provider value={{ user, loading, login, register, updateUser, logout }}>
       {children}
     </Ctx.Provider>
   );

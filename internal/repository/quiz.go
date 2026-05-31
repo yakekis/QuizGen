@@ -45,12 +45,12 @@ func (r *QuizRepository) GetByID(ctx context.Context, id uuid.UUID) (*models.Qui
 	q := &models.Quiz{}
 	err := r.db.QueryRowContext(ctx, `
 		SELECT id, user_id, title, subject, grade, topic, description,
-		       source_filename, time_limit_secs, attempt_limit,
+		       source_text, source_filename, time_limit_secs, attempt_limit,
 		       shuffle_questions, shuffle_answers, status, created_at, updated_at
 		FROM quizzes WHERE id = $1`, id,
 	).Scan(
 		&q.ID, &q.UserID, &q.Title, &q.Subject, &q.Grade, &q.Topic, &q.Description,
-		&q.SourceFilename, &q.TimeLimitSecs, &q.AttemptLimit,
+		&q.SourceText, &q.SourceFilename, &q.TimeLimitSecs, &q.AttemptLimit,
 		&q.ShuffleQuestions, &q.ShuffleAnswers, &q.Status, &q.CreatedAt, &q.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -101,8 +101,40 @@ func (r *QuizRepository) Update(ctx context.Context, q *models.Quiz) error {
 }
 
 func (r *QuizRepository) Delete(ctx context.Context, id, userID uuid.UUID) error {
-	_, err := r.db.ExecContext(ctx, `DELETE FROM quizzes WHERE id=$1 AND user_id=$2`, id, userID)
-	return err
+	// session_answers.question_id ссылается на questions(id) без ON DELETE CASCADE,
+	// поэтому каскадное удаление квиза (quizzes → questions) упирается в этот FK,
+	// если у квиза есть пройденные сессии с ответами. Удаляем ответы сессий явно
+	// в транзакции, остальное (questions, answers, quiz_sessions, group_*) убирают
+	// существующие каскады от quizzes.
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// Проверяем владельца, чтобы не удалить чужой квиз.
+	var owner uuid.UUID
+	if err := tx.QueryRowContext(ctx, `SELECT user_id FROM quizzes WHERE id=$1`, id).Scan(&owner); err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return err
+	}
+	if owner != userID {
+		return fmt.Errorf("access denied")
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM session_answers
+		WHERE session_id IN (SELECT id FROM quiz_sessions WHERE quiz_id=$1)`, id); err != nil {
+		return err
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM quizzes WHERE id=$1 AND user_id=$2`, id, userID); err != nil {
+		return err
+	}
+
+	return tx.Commit()
 }
 
 // ── Questions ─────────────────────────────────────────────────────────────────
@@ -113,41 +145,88 @@ func (r *QuizRepository) SaveQuestions(ctx context.Context, quizID uuid.UUID, qu
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.ExecContext(ctx, `DELETE FROM questions WHERE quiz_id=$1`, quizID); err != nil {
-		return err
+	// Сохраняем вопросы как diff, а НЕ полным пересозданием. Раньше функция
+	// удаляла session_answers и все вопросы, заново вставляя вопросы с новыми
+	// id — из-за этого любое сохранение квиза в редакторе стирало ответы
+	// учеников и всю статистику прохождений. Теперь:
+	//   • существующие вопросы (пришли с id) — UPDATE на месте, id сохраняется,
+	//     поэтому связанные session_answers остаются валидными;
+	//   • новые вопросы (без id) — INSERT;
+	//   • вопросы, которых больше нет в payload, — DELETE (ON DELETE CASCADE
+	//     уберёт их session_answers).
+
+	keepIDs := make([]uuid.UUID, 0, len(questions))
+	for i := range questions {
+		if questions[i].ID != uuid.Nil {
+			keepIDs = append(keepIDs, questions[i].ID)
+		}
+	}
+	if len(keepIDs) > 0 {
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM questions WHERE quiz_id=$1 AND NOT (id = ANY($2::uuid[]))`,
+			quizID, pq.Array(keepIDs)); err != nil {
+			return fmt.Errorf("prune questions: %w", err)
+		}
+	} else if _, err := tx.ExecContext(ctx, `DELETE FROM questions WHERE quiz_id=$1`, quizID); err != nil {
+		return fmt.Errorf("clear questions: %w", err)
 	}
 
 	for i := range questions {
 		q := &questions[i]
-		if q.ID == uuid.Nil {
-			q.ID = uuid.New()
-		}
+		q.QuizID = quizID
 		q.Position = i
 
-		err := tx.QueryRowContext(ctx, `
-			INSERT INTO questions (id, quiz_id, position, type, text, explanation, time_limit_secs)
-			VALUES ($1,$2,$3,$4,$5,$6,$7)
-			RETURNING created_at, updated_at`,
-			q.ID, quizID, q.Position, q.Type, q.Text, q.Explanation, q.TimeLimitSecs,
-		).Scan(&q.CreatedAt, &q.UpdatedAt)
-		if err != nil {
-			return fmt.Errorf("insert question %d: %w", i, err)
+		if q.ID == uuid.Nil {
+			q.ID = uuid.New()
+			if err := tx.QueryRowContext(ctx, `
+				INSERT INTO questions (id, quiz_id, position, type, text, explanation, image_url, time_limit_secs)
+				VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+				RETURNING created_at, updated_at`,
+				q.ID, quizID, q.Position, q.Type, q.Text, q.Explanation, q.ImageURL, q.TimeLimitSecs,
+			).Scan(&q.CreatedAt, &q.UpdatedAt); err != nil {
+				return fmt.Errorf("insert question %d: %w", i, err)
+			}
+		} else {
+			res, err := tx.ExecContext(ctx, `
+				UPDATE questions
+				SET position=$2, type=$3, text=$4, explanation=$5, image_url=$6, time_limit_secs=$7, updated_at=NOW()
+				WHERE id=$1 AND quiz_id=$8`,
+				q.ID, q.Position, q.Type, q.Text, q.Explanation, q.ImageURL, q.TimeLimitSecs, quizID)
+			if err != nil {
+				return fmt.Errorf("update question %d: %w", i, err)
+			}
+			// id пришёл, но такого вопроса нет (рассинхрон клиента) — создаём.
+			if n, _ := res.RowsAffected(); n == 0 {
+				if err := tx.QueryRowContext(ctx, `
+					INSERT INTO questions (id, quiz_id, position, type, text, explanation, image_url, time_limit_secs)
+					VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+					RETURNING created_at, updated_at`,
+					q.ID, quizID, q.Position, q.Type, q.Text, q.Explanation, q.ImageURL, q.TimeLimitSecs,
+				).Scan(&q.CreatedAt, &q.UpdatedAt); err != nil {
+					return fmt.Errorf("insert question %d: %w", i, err)
+				}
+			}
 		}
 
+		// Варианты ответа пересоздаём для вопроса целиком: их немного, и они не
+		// связаны внешним ключом с session_answers (там selected_answer_ids —
+		// обычный массив uuid, без FK). id сохраняем, если он пришёл.
+		if _, err := tx.ExecContext(ctx, `DELETE FROM answers WHERE question_id=$1`, q.ID); err != nil {
+			return fmt.Errorf("clear answers for question %d: %w", i, err)
+		}
 		for j := range q.Answers {
 			a := &q.Answers[j]
 			if a.ID == uuid.Nil {
 				a.ID = uuid.New()
 			}
+			a.QuestionID = q.ID
 			a.Position = j
-
-			err := tx.QueryRowContext(ctx, `
+			if err := tx.QueryRowContext(ctx, `
 				INSERT INTO answers (id, question_id, position, text, is_correct)
 				VALUES ($1,$2,$3,$4,$5)
 				RETURNING created_at`,
 				a.ID, q.ID, a.Position, a.Text, a.IsCorrect,
-			).Scan(&a.CreatedAt)
-			if err != nil {
+			).Scan(&a.CreatedAt); err != nil {
 				return fmt.Errorf("insert answer %d.%d: %w", i, j, err)
 			}
 		}
@@ -158,7 +237,7 @@ func (r *QuizRepository) SaveQuestions(ctx context.Context, quizID uuid.UUID, qu
 
 func (r *QuizRepository) GetQuestions(ctx context.Context, quizID uuid.UUID) ([]models.Question, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT id, quiz_id, position, type, text, explanation, time_limit_secs, created_at, updated_at
+		SELECT id, quiz_id, position, type, text, explanation, image_url, time_limit_secs, created_at, updated_at
 		FROM questions WHERE quiz_id=$1 ORDER BY position`, quizID)
 	if err != nil {
 		return nil, err
@@ -170,7 +249,7 @@ func (r *QuizRepository) GetQuestions(ctx context.Context, quizID uuid.UUID) ([]
 		var q models.Question
 		if err := rows.Scan(
 			&q.ID, &q.QuizID, &q.Position, &q.Type, &q.Text,
-			&q.Explanation, &q.TimeLimitSecs, &q.CreatedAt, &q.UpdatedAt,
+			&q.Explanation, &q.ImageURL, &q.TimeLimitSecs, &q.CreatedAt, &q.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -220,14 +299,30 @@ func (r *QuizRepository) CreateSession(ctx context.Context, s *models.QuizSessio
 func (r *QuizRepository) GetSessionByToken(ctx context.Context, token string) (*models.QuizSession, error) {
 	s := &models.QuizSession{}
 	err := r.db.QueryRowContext(ctx, `
-		SELECT id, quiz_id, token, mode, group_session_id, student_name, started_at, finished_at, score, attempt_num, created_at
+		SELECT id, quiz_id, token, mode, group_session_id, student_name, started_at, finished_at, score, attempt_num, tab_switches, created_at
 		FROM quiz_sessions WHERE token=$1`, token,
 	).Scan(&s.ID, &s.QuizID, &s.Token, &s.Mode, &s.GroupSessionID, &s.StudentName,
-		&s.StartedAt, &s.FinishedAt, &s.Score, &s.AttemptNum, &s.CreatedAt)
+		&s.StartedAt, &s.FinishedAt, &s.Score, &s.AttemptNum, &s.TabSwitches, &s.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	return s, err
+}
+
+// IncrementTabSwitches увеличивает счётчик переключений вкладки на 1.
+// Работает только для незавершённых сессий, чтобы нельзя было «накрутить»
+// счётчик после сдачи квиза.
+func (r *QuizRepository) IncrementTabSwitches(ctx context.Context, token string) (int, error) {
+	var count int
+	err := r.db.QueryRowContext(ctx, `
+		UPDATE quiz_sessions
+		SET tab_switches = tab_switches + 1
+		WHERE token=$1 AND finished_at IS NULL
+		RETURNING tab_switches`, token).Scan(&count)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	return count, err
 }
 
 func (r *QuizRepository) FinishSession(ctx context.Context, sessionID uuid.UUID, score float64) error {
@@ -249,10 +344,10 @@ func (r *QuizRepository) SaveSessionAnswer(ctx context.Context, a *models.Sessio
 		a.ID = uuid.New()
 	}
 	_, err := r.db.ExecContext(ctx, `
-		INSERT INTO session_answers (id, session_id, question_id, selected_answer_ids, is_correct)
-		VALUES ($1,$2,$3,$4,$5)`,
+		INSERT INTO session_answers (id, session_id, question_id, selected_answer_ids, is_correct, time_spent_ms)
+		VALUES ($1,$2,$3,$4,$5,$6)`,
 		a.ID, a.SessionID, a.QuestionID,
-		pq.Array(a.SelectedAnswerIDs), a.IsCorrect,
+		pq.Array(a.SelectedAnswerIDs), a.IsCorrect, a.TimeSpentMs,
 	)
 	return err
 }
@@ -268,10 +363,10 @@ func (r *QuizRepository) CountCorrectAnswers(ctx context.Context, sessionID uuid
 func (r *QuizRepository) GetSessionByID(ctx context.Context, id uuid.UUID) (*models.QuizSession, error) {
 	s := &models.QuizSession{}
 	err := r.db.QueryRowContext(ctx, `
-		SELECT id, quiz_id, token, mode, group_session_id, student_name, started_at, finished_at, score, attempt_num, created_at
+		SELECT id, quiz_id, token, mode, group_session_id, student_name, started_at, finished_at, score, attempt_num, tab_switches, created_at
 		FROM quiz_sessions WHERE id=$1`, id,
 	).Scan(&s.ID, &s.QuizID, &s.Token, &s.Mode, &s.GroupSessionID, &s.StudentName,
-		&s.StartedAt, &s.FinishedAt, &s.Score, &s.AttemptNum, &s.CreatedAt)
+		&s.StartedAt, &s.FinishedAt, &s.Score, &s.AttemptNum, &s.TabSwitches, &s.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -280,7 +375,7 @@ func (r *QuizRepository) GetSessionByID(ctx context.Context, id uuid.UUID) (*mod
 
 func (r *QuizRepository) GetSessionAnswers(ctx context.Context, sessionID uuid.UUID) ([]models.SessionAnswer, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT id, session_id, question_id, selected_answer_ids, is_correct, answered_at
+		SELECT id, session_id, question_id, selected_answer_ids, is_correct, time_spent_ms, answered_at
 		FROM session_answers WHERE session_id=$1 ORDER BY answered_at`, sessionID)
 	if err != nil {
 		return nil, err
@@ -291,7 +386,7 @@ func (r *QuizRepository) GetSessionAnswers(ctx context.Context, sessionID uuid.U
 	for rows.Next() {
 		var a models.SessionAnswer
 		var ids pq.StringArray
-		if err := rows.Scan(&a.ID, &a.SessionID, &a.QuestionID, &ids, &a.IsCorrect, &a.AnsweredAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.SessionID, &a.QuestionID, &ids, &a.IsCorrect, &a.TimeSpentMs, &a.AnsweredAt); err != nil {
 			return nil, err
 		}
 		a.SelectedAnswerIDs = make([]uuid.UUID, 0, len(ids))
@@ -321,48 +416,120 @@ func (r *QuizRepository) GetStats(ctx context.Context, quizID, userID uuid.UUID)
 	}
 
 	qRows, err := r.db.QueryContext(ctx, `
-		SELECT q.id, q.text,
-		       SUM(CASE WHEN sa.is_correct THEN 1 ELSE 0 END),
-		       COUNT(sa.id)
+		SELECT q.id, q.text, q.type, q.position,
+		       COALESCE(SUM(CASE WHEN sa.is_correct THEN 1 ELSE 0 END), 0),
+		       COUNT(sa.id),
+		       COALESCE(AVG(NULLIF(sa.time_spent_ms, 0)), 0)
 		FROM questions q
 		LEFT JOIN session_answers sa ON sa.question_id = q.id
 		WHERE q.quiz_id=$1
-		GROUP BY q.id, q.text, q.position
+		GROUP BY q.id, q.text, q.type, q.position
 		ORDER BY q.position`, quizID)
 	if err != nil {
 		return nil, err
 	}
 	defer qRows.Close()
 
+	// qIndex: question_id → индекс в stats.Questions, чтобы подвесить варианты.
+	qIndex := map[uuid.UUID]int{}
 	for qRows.Next() {
 		var qs models.QuestionStat
-		if err := qRows.Scan(&qs.QuestionID, &qs.Text, &qs.CorrectCount, &qs.TotalCount); err != nil {
+		var avgMs float64
+		if err := qRows.Scan(&qs.QuestionID, &qs.Text, &qs.Type, &qs.Position, &qs.CorrectCount, &qs.TotalCount, &avgMs); err != nil {
 			return nil, err
 		}
+		qs.AvgTimeSec = avgMs / 1000.0
+		qs.Options = []models.OptionStat{}
+		qIndex[qs.QuestionID] = len(stats.Questions)
 		stats.Questions = append(stats.Questions, qs)
 	}
 	if err := qRows.Err(); err != nil {
 		return nil, err
 	}
 
+	// Разбивка по вариантам ответа: сколько учеников выбрало каждый вариант.
+	oRows, err := r.db.QueryContext(ctx, `
+		SELECT a.question_id, a.id, a.text, a.is_correct,
+		       COUNT(sa.id) FILTER (WHERE sa.selected_answer_ids @> ARRAY[a.id])
+		FROM answers a
+		JOIN questions q ON q.id = a.question_id
+		LEFT JOIN session_answers sa ON sa.question_id = a.question_id
+		WHERE q.quiz_id=$1
+		GROUP BY a.question_id, a.id, a.text, a.is_correct, a.position
+		ORDER BY a.question_id, a.position`, quizID)
+	if err != nil {
+		return nil, err
+	}
+	defer oRows.Close()
+
+	for oRows.Next() {
+		var qid uuid.UUID
+		var os models.OptionStat
+		if err := oRows.Scan(&qid, &os.AnswerID, &os.Text, &os.IsCorrect, &os.SelectedCount); err != nil {
+			return nil, err
+		}
+		if idx, ok := qIndex[qid]; ok {
+			stats.Questions[idx].Options = append(stats.Questions[idx].Options, os)
+		}
+	}
+	if err := oRows.Err(); err != nil {
+		return nil, err
+	}
+
 	sRows, err := r.db.QueryContext(ctx, `
-		SELECT id, COALESCE(student_name, ''), score, started_at, finished_at, attempt_num
-		FROM quiz_sessions
-		WHERE quiz_id=$1
-		ORDER BY COALESCE(finished_at, started_at, created_at) DESC`, quizID)
+		SELECT s.id, COALESCE(s.student_name, ''), s.score, s.started_at, s.finished_at,
+		       s.attempt_num, s.tab_switches,
+		       COALESCE(SUM(CASE WHEN sa.is_correct THEN 1 ELSE 0 END), 0) AS correct_count,
+		       COUNT(sa.id) AS answered_count,
+		       COALESCE(SUM(sa.time_spent_ms), 0) AS total_time_ms
+		FROM quiz_sessions s
+		LEFT JOIN session_answers sa ON sa.session_id = s.id
+		WHERE s.quiz_id=$1
+		GROUP BY s.id, s.student_name, s.score, s.started_at, s.finished_at,
+		         s.attempt_num, s.tab_switches, s.created_at
+		ORDER BY COALESCE(s.finished_at, s.started_at, s.created_at) DESC`, quizID)
 	if err != nil {
 		return nil, err
 	}
 	defer sRows.Close()
 
+	// sIndex: session_id → индекс, чтобы подвесить поответную матрицу.
+	sIndex := map[uuid.UUID]int{}
 	for sRows.Next() {
 		var ss models.SessionStat
-		if err := sRows.Scan(&ss.SessionID, &ss.StudentName, &ss.Score, &ss.StartedAt, &ss.FinishedAt, &ss.AttemptNum); err != nil {
+		if err := sRows.Scan(&ss.SessionID, &ss.StudentName, &ss.Score, &ss.StartedAt, &ss.FinishedAt, &ss.AttemptNum, &ss.TabSwitches, &ss.CorrectCount, &ss.AnsweredCount, &ss.TotalTimeMs); err != nil {
 			return nil, err
 		}
+		ss.Answers = []models.SessionAnswerBrief{}
+		sIndex[ss.SessionID] = len(stats.Sessions)
 		stats.Sessions = append(stats.Sessions, ss)
 	}
-	return stats, sRows.Err()
+	if err := sRows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Матрица «участник × вопрос»: правильность каждого ответа каждой сессии.
+	mRows, err := r.db.QueryContext(ctx, `
+		SELECT sa.session_id, sa.question_id, sa.is_correct
+		FROM session_answers sa
+		JOIN quiz_sessions s ON s.id = sa.session_id
+		WHERE s.quiz_id=$1`, quizID)
+	if err != nil {
+		return nil, err
+	}
+	defer mRows.Close()
+
+	for mRows.Next() {
+		var sid uuid.UUID
+		var brief models.SessionAnswerBrief
+		if err := mRows.Scan(&sid, &brief.QuestionID, &brief.IsCorrect); err != nil {
+			return nil, err
+		}
+		if idx, ok := sIndex[sid]; ok {
+			stats.Sessions[idx].Answers = append(stats.Sessions[idx].Answers, brief)
+		}
+	}
+	return stats, mRows.Err()
 }
 
 func (r *QuizRepository) IdentifySession(ctx context.Context, token, name string) (*models.QuizSession, error) {

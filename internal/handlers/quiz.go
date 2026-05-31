@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -153,7 +155,9 @@ func (h *QuizHandler) Update(c *gin.Context) {
 		return
 	}
 
-	if len(body.Questions) > 0 {
+	// body.Questions == nil — поле не прислали, вопросы не трогаем.
+	// Пустой (но не nil) срез — редактор намеренно очистил все вопросы.
+	if body.Questions != nil {
 		if err := h.quizRepo.SaveQuestions(c.Request.Context(), quizID, body.Questions); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -161,6 +165,64 @@ func (h *QuizHandler) Update(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "updated"})
+}
+
+// ── POST /api/uploads/image ───────────────────────────────────────────────────
+// Принимает картинку (multipart, поле "file") и возвращает её публичный URL.
+// Файлы сохраняются в ./static/uploads и раздаются как /static/uploads/*.
+func (h *QuizHandler) UploadImage(c *gin.Context) {
+	maxBytes := int64(h.cfg.Upload.MaxSizeMB) << 20
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBytes)
+
+	file, _, err := c.Request.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "file is required"})
+		return
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(file)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read file"})
+		return
+	}
+
+	// Определяем тип по содержимому, а не по расширению, которое легко подделать.
+	ext, ok := imageExt(http.DetectContentType(data))
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported image type (allowed: jpeg, png, gif, webp)"})
+		return
+	}
+
+	const uploadDir = "./static/uploads"
+	if err := os.MkdirAll(uploadDir, 0o755); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to prepare upload dir"})
+		return
+	}
+
+	name := uuid.New().String() + ext
+	if err := os.WriteFile(filepath.Join(uploadDir, name), data, 0o644); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save file"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{"url": "/static/uploads/" + name})
+}
+
+// imageExt сопоставляет MIME-тип расширению; пустой второй результат — тип не поддержан.
+func imageExt(contentType string) (string, bool) {
+	switch contentType {
+	case "image/jpeg":
+		return ".jpg", true
+	case "image/png":
+		return ".png", true
+	case "image/gif":
+		return ".gif", true
+	case "image/webp":
+		return ".webp", true
+	default:
+		return "", false
+	}
 }
 
 // ── DELETE /api/quizzes/:id ───────────────────────────────────────────────────
@@ -422,10 +484,36 @@ func (h *QuizHandler) GetSession(c *gin.Context) {
 		}
 	}
 
+	// Параметры квиза (лимит времени и попыток) нужны плееру для таймера
+	// и кнопки «Пройти ещё раз».
+	var timeLimit *int
+	attemptLimit := 1
+	attemptsUsed := 0
+	if quiz, _ := h.quizRepo.GetByID(c.Request.Context(), session.QuizID); quiz != nil {
+		timeLimit = quiz.TimeLimitSecs
+		attemptLimit = quiz.AttemptLimit
+		attemptsUsed = h.quizSvc.AttemptsUsed(c.Request.Context(), session.QuizID, session.StudentName)
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"session":   session,
-		"questions": questions,
+		"session":         session,
+		"questions":       questions,
+		"time_limit_secs": timeLimit,
+		"attempt_limit":   attemptLimit,
+		"attempts_used":   attemptsUsed,
 	})
+}
+
+// ── POST /api/sessions/:token/retry ───────────────────────────────────────────
+// Создаёт новую попытку для того же ученика, если лимит попыток не исчерпан.
+func (h *QuizHandler) RetryAttempt(c *gin.Context) {
+	token := c.Param("token")
+	session, err := h.quizSvc.RetryAttempt(c.Request.Context(), token)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusCreated, session)
 }
 
 // ── POST /api/quizzes/:id/questions/:qid/regenerate ──────────────────────────
@@ -481,6 +569,7 @@ func (h *QuizHandler) SubmitAnswer(c *gin.Context) {
 	var body struct {
 		QuestionID  string   `json:"question_id" binding:"required"`
 		SelectedIDs []string `json:"selected_answer_ids" binding:"required"`
+		TimeSpentMs int      `json:"time_spent_ms"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -503,7 +592,7 @@ func (h *QuizHandler) SubmitAnswer(c *gin.Context) {
 		selectedIDs = append(selectedIDs, id)
 	}
 
-	if err := h.quizSvc.SubmitAnswer(c.Request.Context(), token, qID, selectedIDs); err != nil {
+	if err := h.quizSvc.SubmitAnswer(c.Request.Context(), token, qID, selectedIDs, body.TimeSpentMs); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -512,6 +601,18 @@ func (h *QuizHandler) SubmitAnswer(c *gin.Context) {
 	_ = h.quizSvc.UpdateGroupResult(c.Request.Context(), token)
 
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// ── POST /api/sessions/:token/tab-switch ─────────────────────────────────────
+// «Режим честности»: фронтенд сообщает о каждом уходе с вкладки квиза.
+func (h *QuizHandler) ReportTabSwitch(c *gin.Context) {
+	token := c.Param("token")
+	count, err := h.quizSvc.RecordTabSwitch(c.Request.Context(), token)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"tab_switches": count})
 }
 
 // ── POST /api/sessions/:token/finish ─────────────────────────────────────────
@@ -594,11 +695,15 @@ func (h *QuizHandler) StatsCSV(c *gin.Context) {
 	w := csv.NewWriter(c.Writer)
 	defer w.Flush()
 
-	w.Write([]string{"Ученик", "Балл, %", "Попытка", "Начато", "Завершено"})
+	w.Write([]string{"Ученик", "Точность, %", "Верно", "Неверно", "Попытка", "Переключений вкладки", "Начато", "Завершено"})
 	for _, s := range stats.Sessions {
 		score := ""
 		if s.Score != nil {
 			score = fmt.Sprintf("%.0f", *s.Score*100)
+		}
+		incorrect := s.AnsweredCount - s.CorrectCount
+		if incorrect < 0 {
+			incorrect = 0
 		}
 		started := ""
 		if s.StartedAt != nil {
@@ -608,7 +713,7 @@ func (h *QuizHandler) StatsCSV(c *gin.Context) {
 		if s.FinishedAt != nil {
 			finished = s.FinishedAt.Format("2006-01-02 15:04:05")
 		}
-		w.Write([]string{s.StudentName, score, strconv.Itoa(s.AttemptNum), started, finished})
+		w.Write([]string{s.StudentName, score, strconv.Itoa(s.CorrectCount), strconv.Itoa(incorrect), strconv.Itoa(s.AttemptNum), strconv.Itoa(s.TabSwitches), started, finished})
 	}
 }
 

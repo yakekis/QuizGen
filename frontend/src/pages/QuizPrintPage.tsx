@@ -77,6 +77,13 @@ export function QuizPrintPage() {
                 ({q.type === 'single' ? 'один ответ' : q.type === 'multiple' ? 'несколько' : 'верно/неверно'})
               </span>
             </div>
+            {q.image_url && (
+              <img
+                src={q.image_url}
+                alt="Иллюстрация к вопросу"
+                className="mt-2 max-h-56 rounded-lg border border-slate-200"
+              />
+            )}
             <ul className="mt-2 space-y-1.5 pl-6 text-slate-800">
               {q.answers.map((a, j) => (
                 <li key={a.id} className="flex items-start gap-2">
@@ -95,7 +102,7 @@ export function QuizPrintPage() {
       </ol>
 
       <footer className="mt-12 border-t border-slate-200 pt-4 text-center text-xs text-slate-400">
-        Сгенерировано QuizGen
+        Сгенерировано QuizGen × СберОбразование
       </footer>
     </div>
   );

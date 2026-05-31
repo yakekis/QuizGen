@@ -49,9 +49,21 @@ export function SessionDetailsPage() {
         </p>
       </div>
 
-      <div className="grid grid-cols-3 gap-4">
+      {session.tab_switches > 0 && (
+        <div
+          className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900"
+          role="alert"
+        >
+          ⚠ <strong>Переключение вкладок:</strong> ученик уходил со страницы квиза{' '}
+          {session.tab_switches}{' '}
+          {pluralizeTimes(session.tab_switches)} во время прохождения.
+        </div>
+      )}
+
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
         <StatBox label="Правильных" value={`${correctCount} / ${total}`} />
         <StatBox label="Отвечено" value={`${answered} / ${total}`} />
+        <StatBox label="Переключений" value={session.tab_switches} />
         <StatBox label="Итог" value={`${scorePct}%`} accent />
       </div>
 
@@ -91,6 +103,14 @@ export function SessionDetailsPage() {
                     {isCorrect ? '✓ Верно' : isWrong ? '✗ Неверно' : '— Не отвечено'}
                   </span>
                 </div>
+
+                {q.image_url && (
+                  <img
+                    src={q.image_url}
+                    alt="Иллюстрация к вопросу"
+                    className="mb-3 max-h-56 rounded-lg border border-slate-200 bg-white"
+                  />
+                )}
 
                 <ul className="space-y-2">
                   {q.answers.map((opt) => {
@@ -138,9 +158,17 @@ export function SessionDetailsPage() {
   );
 }
 
+// Русское склонение слова «раз»: 2/3/4 → «раза», иначе (1, 5, 11…) → «раз».
+function pluralizeTimes(n: number): string {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return 'раза';
+  return 'раз';
+}
+
 function StatBox({ label, value, accent }: { label: string; value: string | number; accent?: boolean }) {
   return (
-    <div className={`surface p-4 text-center ${accent ? 'bg-gradient-to-br from-brand-500 to-brand-700 text-white border-transparent' : ''}`}>
+    <div className={`surface p-4 text-center ${accent ? 'bg-sber text-white border-transparent' : ''}`}>
       <div className={`text-2xl font-bold ${accent ? 'text-white' : 'text-slate-900'}`}>{value}</div>
       <div className={`mt-1 text-xs uppercase tracking-wide ${accent ? 'text-brand-100' : 'text-slate-500'}`}>{label}</div>
     </div>

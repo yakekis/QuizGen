@@ -64,6 +64,7 @@ type Question struct {
 	Type          QuestionType `json:"type" db:"type"`
 	Text          string       `json:"text" db:"text"`
 	Explanation   string       `json:"explanation" db:"explanation"`
+	ImageURL      string       `json:"image_url" db:"image_url"`
 	TimeLimitSecs *int         `json:"time_limit_secs" db:"time_limit_secs"`
 	Answers       []Answer     `json:"answers,omitempty" db:"-"`
 	CreatedAt     time.Time    `json:"created_at" db:"created_at"`
@@ -101,6 +102,7 @@ type QuizSession struct {
 	FinishedAt     *time.Time `json:"finished_at" db:"finished_at"`
 	Score          *float64   `json:"score" db:"score"`
 	AttemptNum     int        `json:"attempt_num" db:"attempt_num"`
+	TabSwitches    int        `json:"tab_switches" db:"tab_switches"`
 	CreatedAt      time.Time  `json:"created_at" db:"created_at"`
 }
 
@@ -112,6 +114,7 @@ type SessionAnswer struct {
 	QuestionID        uuid.UUID   `json:"question_id" db:"question_id"`
 	SelectedAnswerIDs []uuid.UUID `json:"selected_answer_ids" db:"selected_answer_ids"`
 	IsCorrect         *bool       `json:"is_correct" db:"is_correct"`
+	TimeSpentMs       int         `json:"time_spent_ms" db:"time_spent_ms"`
 	AnsweredAt        time.Time   `json:"answered_at" db:"answered_at"`
 }
 
@@ -184,19 +187,43 @@ type QuizStats struct {
 }
 
 type SessionStat struct {
-	SessionID   uuid.UUID  `json:"session_id"`
-	StudentName string     `json:"student_name"`
-	Score       *float64   `json:"score"`
-	StartedAt   *time.Time `json:"started_at"`
-	FinishedAt  *time.Time `json:"finished_at"`
-	AttemptNum  int        `json:"attempt_num"`
+	SessionID     uuid.UUID            `json:"session_id"`
+	StudentName   string               `json:"student_name"`
+	Score         *float64             `json:"score"`
+	StartedAt     *time.Time           `json:"started_at"`
+	FinishedAt    *time.Time           `json:"finished_at"`
+	AttemptNum    int                  `json:"attempt_num"`
+	TabSwitches   int                  `json:"tab_switches"`
+	CorrectCount  int                  `json:"correct_count"`  // верных ответов в попытке
+	AnsweredCount int                  `json:"answered_count"` // всего отвеченных вопросов
+	TotalTimeMs   int                  `json:"total_time_ms"`  // суммарное время на ответы
+	Answers       []SessionAnswerBrief `json:"answers"`        // поответная правильность (матрица)
+}
+
+// SessionAnswerBrief — компактная правильность одного ответа ученика,
+// чтобы фронт мог построить матрицу «участник × вопрос».
+type SessionAnswerBrief struct {
+	QuestionID uuid.UUID `json:"question_id"`
+	IsCorrect  *bool     `json:"is_correct"`
 }
 
 type QuestionStat struct {
-	QuestionID   uuid.UUID `json:"question_id"`
-	Text         string    `json:"text"`
-	CorrectCount int       `json:"correct_count"`
-	TotalCount   int       `json:"total_count"`
+	QuestionID   uuid.UUID    `json:"question_id"`
+	Text         string       `json:"text"`
+	Type         string       `json:"type"`
+	Position     int          `json:"position"`
+	CorrectCount int          `json:"correct_count"`
+	TotalCount   int          `json:"total_count"`
+	AvgTimeSec   float64      `json:"avg_time_sec"`
+	Options      []OptionStat `json:"options"`
+}
+
+// OptionStat — сколько раз вариант ответа был выбран учениками.
+type OptionStat struct {
+	AnswerID      uuid.UUID `json:"answer_id"`
+	Text          string    `json:"text"`
+	IsCorrect     bool      `json:"is_correct"`
+	SelectedCount int       `json:"selected_count"`
 }
 
 type RegisterRequest struct {
@@ -213,6 +240,15 @@ type LoginRequest struct {
 type AuthResponse struct {
 	Token string `json:"token"`
 	User  User   `json:"user"`
+}
+
+// UpdateProfileRequest — редактирование профиля учителя.
+// CurrentPassword обязателен только при смене пароля.
+type UpdateProfileRequest struct {
+	Name            string `json:"name" binding:"required,min=1"`
+	Email           string `json:"email" binding:"required,email"`
+	CurrentPassword string `json:"current_password"`
+	NewPassword     string `json:"new_password"`
 }
 
 // ── Group Mode Requests ──────────────────────────────────────────────────────

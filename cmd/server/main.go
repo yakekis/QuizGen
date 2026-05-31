@@ -50,10 +50,12 @@ func main() {
 	llmSvc := service.NewLLMService(cfg.LLM)
 	authSvc := service.NewAuthService(userRepo, cfg.App.SecretKey, cfg.Session.TTL)
 	quizSvc := service.NewQuizService(quizRepo, llmSvc, cfg)
+	liveHub := service.NewLiveHub()
 
 	// ── Handlers ──────────────────────────────────────────────────────────────
 	authHandler := handlers.NewAuthHandler(authSvc)
 	quizHandler := handlers.NewQuizHandler(quizSvc, quizRepo, cfg)
+	liveHandler := handlers.NewLiveHandler(liveHub, quizSvc)
 
 	// ── Router ────────────────────────────────────────────────────────────────
 	r := gin.New()
@@ -104,15 +106,35 @@ func main() {
 	api.GET("/sessions/:token", quizHandler.GetSession)
 	api.POST("/sessions/:token/identify", quizHandler.IdentifySession)
 	api.POST("/sessions/:token/answers", quizHandler.SubmitAnswer)
+	api.POST("/sessions/:token/tab-switch", quizHandler.ReportTabSwitch)
 	api.POST("/sessions/:token/finish", quizHandler.FinishSession)
+	api.POST("/sessions/:token/retry", quizHandler.RetryAttempt)
 	api.POST("/group/:access_code/join", quizHandler.JoinGroupSession)
 	api.GET("/group/:access_code/info", quizHandler.GetGroupSessionInfo)
 	api.GET("/group/:access_code/leaderboard", quizHandler.GetLeaderboard)
+
+	// Live group game (Kahoot-style). Host control endpoints authorize via the
+	// host_token returned at creation, so they need no JWT middleware here.
+	live := api.Group("/live")
+	{
+		live.GET("/:pin", liveHandler.Info)
+		live.POST("/:pin/join", liveHandler.Join)
+		live.POST("/:pin/answer", liveHandler.Answer)
+		live.POST("/:pin/start", liveHandler.Start)
+		live.POST("/:pin/next", liveHandler.Next)
+		live.POST("/:pin/end", liveHandler.End)
+		live.GET("/:pin/stream", liveHandler.PlayerStream)
+		live.GET("/:pin/host", liveHandler.HostStream)
+	}
 
 	// Protected (teacher)
 	protected := api.Group("/")
 	protected.Use(middleware.Auth(authSvc, userRepo))
 	{
+		// Profile
+		protected.GET("/me", authHandler.Me)
+		protected.PUT("/me", authHandler.UpdateMe)
+
 		// Quiz CRUD
 		protected.GET("/quizzes", quizHandler.List)
 		protected.GET("/quizzes/:id", quizHandler.Get)
@@ -124,10 +146,16 @@ func main() {
 		protected.GET("/quizzes/:id/sessions/:sessionId", quizHandler.SessionDetails)
 		protected.POST("/quizzes/:id/questions/:qid/regenerate", quizHandler.RegenerateQuestion)
 
+		// Загрузка картинок для вопросов (учитель).
+		protected.POST("/uploads/image", quizHandler.UploadImage)
+
 		// Session (personal link) creation — teacher only
 		protected.POST("/quizzes/:id/sessions", quizHandler.CreateSession)
 
 		protected.POST("/quizzes/:id/group-sessions", quizHandler.CreateGroupSession)
+
+		// Live game creation — teacher only.
+		protected.POST("/quizzes/:id/live", liveHandler.CreateGame)
 
 		// Generate (rate-limited)
 		genGroup := protected.Group("/quizzes")

@@ -12,6 +12,8 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': 'http://localhost:8080',
+      // Загруженные картинки вопросов раздаёт бэкенд из ./static/uploads.
+      '/static': 'http://localhost:8080',
     },
   },
   build: {

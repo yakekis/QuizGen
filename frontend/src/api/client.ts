@@ -12,6 +12,11 @@ import type {
   GroupSessionInfo,
   LeaderboardResponse,
   JoinGroupResponse,
+  LiveCreateResponse,
+  LiveJoinResponse,
+  User,
+  UpdateProfileRequest,
+  SessionLoad,
 } from '../types';
 
 const TOKEN_KEY = 'quizgen.token';
@@ -73,6 +78,11 @@ export const api = {
       body: JSON.stringify({ email, password }),
     }),
 
+  // ── Profile ────────────────────────────────────
+  getMe: () => request<User>('/api/me'),
+  updateProfile: (body: UpdateProfileRequest) =>
+    request<User>('/api/me', { method: 'PUT', body: JSON.stringify(body) }),
+
   // ── Quizzes ────────────────────────────────────
   listQuizzes: async () => {
     const r = await request<{ quizzes: Quiz[] | null }>('/api/quizzes');
@@ -89,6 +99,13 @@ export const api = {
 
   sessionDetails: (quizId: string, sessionId: string) =>
     request<SessionDetails>(`/api/quizzes/${quizId}/sessions/${sessionId}`),
+
+  // Загрузка картинки для вопроса → возвращает публичный URL (/static/uploads/...).
+  uploadImage: (file: File) => {
+    const fd = new FormData();
+    fd.set('file', file);
+    return request<{ url: string }>('/api/uploads/image', { method: 'POST', body: fd });
+  },
 
   regenerateQuestion: (quizId: string, questionId: string) =>
     request<Question>(`/api/quizzes/${quizId}/questions/${questionId}/regenerate`, {
@@ -155,7 +172,10 @@ export const api = {
 
   // ── Session (student, public) ──────────────────
   getSession: (token: string) =>
-    request<{ session: Session; questions: Question[] }>(`/api/sessions/${token}`),
+    request<SessionLoad>(`/api/sessions/${token}`),
+
+  retrySession: (token: string) =>
+    request<Session>(`/api/sessions/${token}/retry`, { method: 'POST' }),
 
   identifySession: (token: string, name: string) =>
     request<Session>(`/api/sessions/${token}/identify`, {
@@ -163,12 +183,44 @@ export const api = {
       body: JSON.stringify({ name }),
     }),
 
-  submitAnswer: (token: string, questionId: string, selectedIds: string[]) =>
+  submitAnswer: (token: string, questionId: string, selectedIds: string[], timeSpentMs = 0) =>
     request<{ ok: boolean }>(`/api/sessions/${token}/answers`, {
       method: 'POST',
-      body: JSON.stringify({ question_id: questionId, selected_answer_ids: selectedIds }),
+      body: JSON.stringify({
+        question_id: questionId,
+        selected_answer_ids: selectedIds,
+        time_spent_ms: timeSpentMs,
+      }),
     }),
 
   finishSession: (token: string) =>
     request<Session>(`/api/sessions/${token}/finish`, { method: 'POST' }),
+
+  reportTabSwitch: (token: string) =>
+    request<{ tab_switches: number }>(`/api/sessions/${token}/tab-switch`, { method: 'POST' }),
+
+  // ── Live game (Kahoot-style) ───────────────────
+  createLiveGame: (quizId: string) =>
+    request<LiveCreateResponse>(`/api/quizzes/${quizId}/live`, { method: 'POST' }),
+
+  liveInfo: (pin: string) =>
+    request<{ pin: string; quiz_title: string }>(`/api/live/${pin}`),
+
+  joinLive: (pin: string, name: string) =>
+    request<LiveJoinResponse>(`/api/live/${pin}/join`, {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    }),
+
+  answerLive: (pin: string, playerId: string, answerId: string) =>
+    request<{ ok: boolean }>(`/api/live/${pin}/answer`, {
+      method: 'POST',
+      body: JSON.stringify({ player_id: playerId, answer_id: answerId }),
+    }),
+
+  liveHostAction: (pin: string, action: 'start' | 'next' | 'end', hostToken: string) =>
+    request<{ ok: boolean }>(`/api/live/${pin}/${action}`, {
+      method: 'POST',
+      body: JSON.stringify({ host_token: hostToken }),
+    }),
 };
