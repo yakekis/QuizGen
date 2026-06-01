@@ -50,6 +50,7 @@ type liveQuestion struct {
 	ID        string
 	Text      string
 	Type      string
+	Image     string
 	TimeLimit int // seconds
 	Answers   []liveAnswer
 }
@@ -135,6 +136,7 @@ func (h *LiveHub) CreateGame(quiz *models.Quiz, questions []models.Question) (*L
 			ID:        q.ID.String(),
 			Text:      q.Text,
 			Type:      string(q.Type),
+			Image:     q.ImageURL,
 			TimeLimit: defaultQuestionSecs,
 		}
 		if q.TimeLimitSecs != nil && *q.TimeLimitSecs > 0 {
@@ -573,6 +575,7 @@ func (g *LiveGame) questionPayloadLocked(forHost bool) map[string]any {
 		"total":         len(g.Questions),
 		"text":          q.Text,
 		"type":          q.Type,
+		"image":         q.Image,
 		"time_limit":    q.TimeLimit,
 		"deadline_unix": g.deadline.UnixMilli(),
 		"options":       options,

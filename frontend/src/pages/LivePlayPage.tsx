@@ -237,7 +237,15 @@ function PlayerQuestion(props: {
         </span>
       </div>
 
-      <h2 className="mb-6 text-center text-xl font-bold leading-snug">{data.text}</h2>
+      <h2 className="mb-4 text-center text-xl font-bold leading-snug">{data.text}</h2>
+
+      {data.image && (
+        <img
+          src={data.image}
+          alt="Иллюстрация к вопросу"
+          className="mx-auto mb-4 max-h-52 w-full rounded-xl object-contain"
+        />
+      )}
 
       <div className="grid flex-1 grid-cols-1 gap-3 sm:grid-cols-2">
         {options.map((o, i) => {

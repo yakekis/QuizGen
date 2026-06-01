@@ -234,6 +234,14 @@ function QuestionView(props: {
         <h2 className="text-2xl font-bold leading-snug sm:text-3xl">{data.text}</h2>
       </div>
 
+      {data.image && (
+        <img
+          src={data.image}
+          alt="Иллюстрация к вопросу"
+          className="mx-auto max-h-72 rounded-xl object-contain"
+        />
+      )}
+
       <div className="grid gap-3 sm:grid-cols-2">
         {options.map((o, i) => {
           const t = tileTheme(i);

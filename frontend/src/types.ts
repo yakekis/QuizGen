@@ -271,6 +271,7 @@ export interface LiveEvent {
   total?: number;
   index?: number;
   text?: string;
+  image?: string;
   type?: QuestionType;
   time_limit?: number;
   deadline_unix?: number;
