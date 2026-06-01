@@ -368,13 +368,18 @@ func (g *LiveGame) SubmitAnswer(playerID, answerID string) error {
 	}
 	g.touch()
 
-	// Tell the host how many have answered; reveal early once everyone has.
+	// Tell the host how many have answered.
 	g.broadcastHostLocked(LiveEvent{Type: "answers", Data: map[string]any{
 		"answered": g.answeredCountLocked(),
 		"total":    len(g.players),
 	}})
+
+	// Ответили все — раскрываем правильный ответ; иначе показываем тем, кто уже
+	// ответил, текущую таблицу лидеров, пока ждём остальных.
 	if g.answeredCountLocked() >= len(g.players) {
 		g.revealLocked()
+	} else {
+		g.broadcastWaitingLocked()
 	}
 	return nil
 }
@@ -501,6 +506,11 @@ func (g *LiveGame) finishLocked() {
 func (g *LiveGame) snapshotForPlayerLocked(p *livePlayer) LiveEvent {
 	switch g.phase {
 	case PhaseQuestion:
+		// Уже ответившему игроку при реконнекте показываем экран ожидания
+		// с таблицей лидеров, остальным — сам вопрос.
+		if p.answered {
+			return LiveEvent{Type: "waiting", Data: g.waitingDataLocked(p)}
+		}
 		data := g.questionPayloadLocked(false)
 		data["answered"] = p.answered
 		return LiveEvent{Type: "question", Data: data}
@@ -625,6 +635,29 @@ func (g *LiveGame) answeredCountLocked() int {
 		}
 	}
 	return n
+}
+
+// waitingDataLocked — данные экрана ожидания для уже ответившего игрока:
+// текущая таблица лидеров и его место, пока остальные ещё отвечают.
+func (g *LiveGame) waitingDataLocked(p *livePlayer) map[string]any {
+	ranks := g.rankMapLocked()
+	return map[string]any{
+		"answered":    g.answeredCountLocked(),
+		"total":       len(g.players),
+		"leaderboard": g.leaderboardLocked(10),
+		"you":         map[string]any{"rank": ranks[p.ID], "total_score": p.Score},
+	}
+}
+
+// broadcastWaitingLocked рассылает обновлённую таблицу лидеров всем, кто уже
+// ответил на текущий вопрос (счёт меняется по мере ответов остальных).
+func (g *LiveGame) broadcastWaitingLocked() {
+	for _, p := range g.players {
+		if !p.answered {
+			continue
+		}
+		g.sendToPlayerLocked(p, LiveEvent{Type: "waiting", Data: g.waitingDataLocked(p)})
+	}
 }
 
 // ── Broadcasting (caller must hold g.mu) ────────────────────────────────────────

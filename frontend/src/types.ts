@@ -224,7 +224,7 @@ export interface LeaderboardResponse {
 
 // ── Live (Kahoot-style) Mode Types ────────────────────────────────────────
 
-export type LivePhase = 'lobby' | 'question' | 'reveal' | 'game_over';
+export type LivePhase = 'lobby' | 'question' | 'waiting' | 'reveal' | 'game_over';
 
 export interface LiveCreateResponse {
   pin: string;

@@ -141,6 +141,7 @@ function LiveGameView(props: { pin: string; playerId: string; name: string }) {
       });
     on('lobby');
     on('question');
+    on('waiting');
     on('reveal');
     on('game_over');
     return () => es.close();
@@ -181,6 +182,7 @@ function LiveGameView(props: { pin: string; playerId: string; name: string }) {
           onChoose={choose}
         />
       )}
+      {phase === 'waiting' && <PlayerWaiting data={data} name={props.name} />}
       {phase === 'reveal' && <PlayerReveal data={data} />}
       {phase === 'game_over' && <PlayerGameOver data={data} name={props.name} />}
     </div>
@@ -257,9 +259,71 @@ function PlayerQuestion(props: {
   );
 }
 
+// Экран ожидания: игрок ответил, остальные ещё думают — показываем таблицу лидеров.
+function PlayerWaiting({ data, name }: { data: LiveEvent; name: string }) {
+  const board = data.leaderboard ?? [];
+  const you = data.you;
+  const answered = typeof data.answered === 'number' ? data.answered : undefined;
+  const total = data.total;
+
+  return (
+    <div className="flex min-h-screen flex-col items-center gap-5 p-6">
+      <div className="text-center">
+        <div className="text-4xl">✅</div>
+        <h2 className="mt-1 text-2xl font-bold">Ответ принят!</h2>
+        <p className="text-slate-400">
+          Ждём остальных…
+          {answered != null && total != null ? ` ${answered}/${total} ответили` : ''}
+        </p>
+      </div>
+
+      <div className="w-full max-w-md rounded-2xl bg-slate-800/60 p-4">
+        <div className="mb-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-400">
+          🏆 Таблица лидеров
+        </div>
+        {board.length === 0 ? (
+          <p className="py-4 text-center text-sm text-slate-500">Пока нет очков</p>
+        ) : (
+          <ol className="space-y-2">
+            {board.map((row) => {
+              const isYou = row.name === name;
+              return (
+                <li
+                  key={row.name}
+                  className={`flex items-center justify-between rounded-lg px-4 py-2 ${
+                    isYou ? 'bg-brand-500 text-white' : 'bg-slate-900/40'
+                  }`}
+                >
+                  <span className="flex items-center gap-3">
+                    <span className={isYou ? 'text-white/80' : 'text-slate-400'}>{row.rank}</span>
+                    <span className="font-medium">
+                      {row.name}
+                      {isYou && ' (вы)'}
+                    </span>
+                  </span>
+                  <span className="font-bold tabular-nums">{row.score}</span>
+                </li>
+              );
+            })}
+          </ol>
+        )}
+      </div>
+
+      {you && (
+        <p className="text-sm text-slate-400">
+          Вы сейчас: <span className="font-bold text-white">{you.rank} место</span> ·{' '}
+          {you.total_score ?? 0} очков
+        </p>
+      )}
+    </div>
+  );
+}
+
 function PlayerReveal({ data }: { data: LiveEvent }) {
   const you = data.you;
   const correct = you?.correct;
+  const correctOptions = (data.options ?? []).filter((o) => o.is_correct);
+
   return (
     <div
       className={`flex min-h-screen flex-col items-center justify-center gap-4 p-6 text-center ${
@@ -274,7 +338,19 @@ function PlayerReveal({ data }: { data: LiveEvent }) {
       {(you?.streak ?? 0) > 1 && correct && (
         <p className="text-white/80">🔥 Серия: {you?.streak}</p>
       )}
-      <div className="mt-2 rounded-xl bg-black/20 px-6 py-3">
+
+      {correctOptions.length > 0 && (
+        <div className="mt-1 w-full max-w-sm rounded-xl bg-black/20 px-5 py-3">
+          <p className="text-sm text-white/70">
+            {correctOptions.length > 1 ? 'Правильные ответы' : 'Правильный ответ'}
+          </p>
+          <p className="mt-1 text-lg font-bold leading-snug">
+            {correctOptions.map((o) => o.text).join(', ')}
+          </p>
+        </div>
+      )}
+
+      <div className="mt-1 rounded-xl bg-black/20 px-6 py-3">
         <p className="text-sm text-white/70">Ваше место</p>
         <p className="text-2xl font-bold">
           {you?.rank} · {you?.total_score ?? 0} очков
