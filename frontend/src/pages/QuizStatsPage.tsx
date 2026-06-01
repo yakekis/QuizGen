@@ -179,7 +179,6 @@ export function QuizStatsPage() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap gap-2">
           <Button variant="secondary" onClick={onDownloadCSV}>📊 Скачать CSV</Button>
-          <Button variant="primary" onClick={() => setShowGroupModal(true)}>👥 Групповой режим</Button>
           {accessCode && (
             <>
               <Button variant="ghost" onClick={onCopyLink}>🔗 Копировать</Button>
