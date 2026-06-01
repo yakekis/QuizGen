@@ -89,13 +89,79 @@ RESPOND ONLY WITH VALID JSON (no markdown, no preamble):
 	return &gq, nil
 }
 
-// GenerateQuiz calls the LLM and returns a structured quiz.
-func (s *LLMService) GenerateQuiz(ctx context.Context, req *models.GenerateQuizRequest) (*models.GeneratedQuiz, error) {
-	prompt := s.buildPrompt(req)
+// batchSize — сколько вопросов запрашиваем у модели за один вызов. Большие
+// запросы (30+) не влезают в лимит токенов: ответ обрывается на середине JSON
+// и до пользователя доходит лишь часть вопросов. Поэтому крупные квизы
+// генерируем порциями и сшиваем результат.
+const batchSize = 10
 
-	// Масштабируем лимит токенов под число вопросов, иначе ответ обрезается
-	// на середине JSON и парсинг падает (особенно при >10 вопросах).
-	maxTokens := 2000 + req.QuestionCount*500
+// GenerateQuiz calls the LLM and returns a structured quiz with the requested
+// number of questions. Большие квизы генерируются несколькими запросами, чтобы
+// ответ не обрезался лимитом токенов, а недобор добивается повторными вызовами.
+func (s *LLMService) GenerateQuiz(ctx context.Context, req *models.GenerateQuizRequest) (*models.GeneratedQuiz, error) {
+	target := req.QuestionCount
+	if target <= 0 {
+		target = 10
+	}
+
+	// Белый список типов: то же значение по умолчанию, что и в buildPrompt.
+	allowed := allowedTypeSet(req.QuestionTypes)
+
+	result := &models.GeneratedQuiz{}
+	var avoid []string // тексты уже сгенерированных вопросов — чтобы не повторяться
+
+	// Запас итераций: даже если каждый батч недодаёт вопросы, не уходим в
+	// бесконечный цикл. Хватает с большим запасом на target/batchSize батчей.
+	maxAttempts := target/batchSize + 4
+	for attempt := 0; len(result.Questions) < target && attempt < maxAttempts; attempt++ {
+		need := target - len(result.Questions)
+		if need > batchSize {
+			need = batchSize
+		}
+
+		batch, err := s.generateBatch(ctx, req, need, avoid)
+		if err != nil {
+			// Уже что-то набрали — отдаём это, а не падаем целиком.
+			if len(result.Questions) > 0 {
+				break
+			}
+			return nil, err
+		}
+		if len(batch.Questions) == 0 {
+			break
+		}
+
+		if result.Title == "" {
+			result.Title = batch.Title
+		}
+		for _, q := range batch.Questions {
+			// Защита от нарушений: отбрасываем типы вне белого списка —
+			// недостающие вопросы добьются на следующей итерации.
+			if !allowed[string(q.Type)] {
+				continue
+			}
+			result.Questions = append(result.Questions, q)
+			avoid = append(avoid, q.Text)
+		}
+	}
+
+	if len(result.Questions) == 0 {
+		return nil, fmt.Errorf("no questions generated")
+	}
+	// На случай, если последний батч слегка перебрал — обрезаем до запрошенного.
+	if len(result.Questions) > target {
+		result.Questions = result.Questions[:target]
+	}
+	return result, nil
+}
+
+// generateBatch запрашивает у модели count вопросов, исключая темы из avoid.
+func (s *LLMService) generateBatch(ctx context.Context, req *models.GenerateQuizRequest, count int, avoid []string) (*models.GeneratedQuiz, error) {
+	prompt := s.buildPrompt(req, count, avoid)
+
+	// Масштабируем лимит токенов под размер батча, иначе ответ обрезается
+	// на середине JSON и парсинг теряет часть вопросов.
+	maxTokens := 2000 + count*500
 
 	body, err := s.callAPI(ctx, prompt, maxTokens)
 	if err != nil {
@@ -111,11 +177,26 @@ func (s *LLMService) GenerateQuiz(ctx context.Context, req *models.GenerateQuizR
 
 // ── Prompt construction ───────────────────────────────────────────────────────
 
-func (s *LLMService) buildPrompt(req *models.GenerateQuizRequest) string {
-	types := req.QuestionTypes
+// resolveTypes возвращает выбранные типы вопросов либо дефолт (single+multiple),
+// если пользователь ничего не выбрал.
+func resolveTypes(types []models.QuestionType) []models.QuestionType {
 	if len(types) == 0 {
-		types = []models.QuestionType{models.QuestionTypeSingle, models.QuestionTypeMultiple}
+		return []models.QuestionType{models.QuestionTypeSingle, models.QuestionTypeMultiple}
 	}
+	return types
+}
+
+// allowedTypeSet — множество допустимых типов (строками) для фильтрации ответа.
+func allowedTypeSet(types []models.QuestionType) map[string]bool {
+	set := make(map[string]bool)
+	for _, t := range resolveTypes(types) {
+		set[string(t)] = true
+	}
+	return set
+}
+
+func (s *LLMService) buildPrompt(req *models.GenerateQuizRequest, count int, avoid []string) string {
+	types := resolveTypes(req.QuestionTypes)
 	typeStr := make([]string, len(types))
 	for i, t := range types {
 		typeStr[i] = string(t)
@@ -144,7 +225,7 @@ func (s *LLMService) buildPrompt(req *models.GenerateQuizRequest) string {
 	sb.WriteString(fmt.Sprintf(`You are an expert teacher creating a quiz for school students.
 Write ALL content (title, questions, answers, explanations) STRICTLY in language: %s.
 
-TASK: Generate a quiz with EXACTLY %d questions.
+TASK: Generate a quiz with EXACTLY %d questions. You MUST output all %d questions — do not stop early.
 
 CONTEXT:
 - Subject: %s
@@ -155,7 +236,18 @@ CONTEXT:
 - Tone of voice: %s
 - Cognitive level (Bloom's taxonomy): %s
 
-`, lang, req.QuestionCount, req.Subject, req.Grade, req.Topic, strings.Join(typeStr, ", "), difficulty, tone, blooms))
+`, lang, count, count, req.Subject, req.Grade, req.Topic, strings.Join(typeStr, ", "), difficulty, tone, blooms))
+
+	// Список ранее сгенерированных вопросов — чтобы батчи не дублировали темы.
+	if len(avoid) > 0 {
+		sb.WriteString("ALREADY GENERATED — DO NOT repeat or paraphrase these questions, cover NEW aspects of the topic:\n")
+		for _, q := range avoid {
+			sb.WriteString("- ")
+			sb.WriteString(q)
+			sb.WriteString("\n")
+		}
+		sb.WriteString("\n")
+	}
 
 	if hasSource {
 		text := req.SourceText
@@ -176,31 +268,65 @@ its scope and rephrase rather than fabricate.
 `, text))
 	}
 
-	sb.WriteString(`INSTRUCTIONS:
-1. Create pedagogically sound questions that test key facts, concepts, and reasoning.
-2. For "single" type: exactly 1 correct answer, 3 plausible distractors based on COMMON STUDENT MISTAKES.
-3. For "multiple" type: 2-3 correct answers, 2-3 wrong distractors.
-4. For "true_false" type: exactly 2 answers: "True" and "False".
-5. Distractors must be believable — typical errors, misconceptions, or close-but-wrong facts.
-6. Add a brief explanation (1-2 sentences) for why the correct answer is right.
-7. Respect requested difficulty (easy/medium/hard/mixed) and Bloom's cognitive level.
-8. Respect tone of voice: "formal" — academic, "playful" — friendly, "neutral" — balanced.`)
-
-	if hasSource {
-		sb.WriteString("\n9. CRITICAL: base every question strictly on the SOURCE MATERIAL above. " +
-			"Questions must be answerable from that document alone; distractors should reflect " +
-			"misreadings of it, not unrelated trivia.")
+	// Жёсткое ограничение по типам: модель обязана использовать ТОЛЬКО выбранные
+	// типы. Без этого она всё равно подмешивает true_false и пр.
+	allowed := make(map[string]bool, len(typeStr))
+	for _, t := range typeStr {
+		allowed[t] = true
 	}
 
-	sb.WriteString(`
+	sb.WriteString(fmt.Sprintf(`INSTRUCTIONS:
+1. Create pedagogically sound questions that test key facts, concepts, and reasoning.
+2. ALLOWED QUESTION TYPES — use ONLY these in the "type" field: %s.
+   This is a STRICT whitelist. Do NOT output a question of any other type under any circumstances.
+   The "type" field of EVERY question MUST be one of: %s.`, strings.Join(typeStr, ", "), strings.Join(typeStr, ", ")))
 
-RESPOND ONLY WITH VALID JSON in this exact schema — no markdown, no preamble:
+	// Правила перечисляем только для разрешённых типов, чтобы не "напоминать"
+	// модели про неактивные форматы.
+	n := 3
+	if allowed["single"] {
+		sb.WriteString(fmt.Sprintf("\n%d. For \"single\" type: exactly 1 correct answer, 3 plausible distractors based on COMMON STUDENT MISTAKES.", n))
+		n++
+	}
+	if allowed["multiple"] {
+		sb.WriteString(fmt.Sprintf("\n%d. For \"multiple\" type: 2-3 correct answers, 2-3 wrong distractors.", n))
+		n++
+	}
+	if allowed["true_false"] {
+		sb.WriteString(fmt.Sprintf("\n%d. For \"true_false\" type: exactly 2 answers: \"True\" and \"False\".", n))
+		n++
+	}
+
+	sb.WriteString(fmt.Sprintf(`
+%d. Distractors must be believable — typical errors, misconceptions, or close-but-wrong facts.
+%d. Add a brief explanation (1-2 sentences) for why the correct answer is right.
+%d. STRICTLY respect the requested difficulty "%s" (easy = basic recall; medium = applied; hard = analysis/multi-step; mixed = vary across questions).
+%d. STRICTLY respect the Bloom's cognitive level "%s" for the cognitive demand of each question.
+%d. STRICTLY respect the tone of voice "%s": "formal" — academic and precise, "playful" — friendly and lively, "neutral" — balanced.`,
+		n, n+1, n+2, difficulty, n+3, blooms, n+4, tone))
+	n += 5
+
+	if hasSource {
+		sb.WriteString(fmt.Sprintf("\n%d. CRITICAL: base every question strictly on the SOURCE MATERIAL above. "+
+			"Questions must be answerable from that document alone; distractors should reflect "+
+			"misreadings of it, not unrelated trivia.", n))
+	}
+
+	// Пример схемы строим под первый разрешённый тип, чтобы не навязывать "single".
+	exampleType := "single"
+	if len(typeStr) > 0 {
+		exampleType = typeStr[0]
+	}
+	sb.WriteString(fmt.Sprintf(`
+
+RESPOND ONLY WITH VALID JSON in this exact schema — no markdown, no preamble.
+The "type" of every question MUST be one of: %s.
 {
   "title": "Quiz title here",
   "questions": [
     {
       "text": "Question text",
-      "type": "single",
+      "type": "%s",
       "explanation": "Why correct answer is right",
       "answers": [
         {"text": "Correct answer", "is_correct": true},
@@ -210,7 +336,7 @@ RESPOND ONLY WITH VALID JSON in this exact schema — no markdown, no preamble:
       ]
     }
   ]
-}`)
+}`, strings.Join(typeStr, ", "), exampleType))
 
 	return sb.String()
 }

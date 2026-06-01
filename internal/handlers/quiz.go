@@ -3,7 +3,9 @@ package handlers
 import (
 	"encoding/csv"
 	"fmt"
+	"hash/fnv"
 	"io"
+	"math/rand"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -463,6 +465,14 @@ func (h *QuizHandler) FinishGroupSession(c *gin.Context) {
 }
 
 // ── GET /api/sessions/:token ──────────────────────────────────────────────────
+// seedFromToken превращает токен сессии в детерминированный seed для
+// перемешивания — один и тот же токен всегда даёт одинаковый порядок.
+func seedFromToken(token string) int64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(token))
+	return int64(h.Sum64())
+}
+
 func (h *QuizHandler) GetSession(c *gin.Context) {
 	token := c.Param("token")
 	session, err := h.quizRepo.GetSessionByToken(c.Request.Context(), token)
@@ -493,6 +503,26 @@ func (h *QuizHandler) GetSession(c *gin.Context) {
 		timeLimit = quiz.TimeLimitSecs
 		attemptLimit = quiz.AttemptLimit
 		attemptsUsed = h.quizSvc.AttemptsUsed(c.Request.Context(), session.QuizID, session.StudentName)
+
+		// Перемешиваем вопросы/ответы согласно настройкам квиза. Порядок
+		// детерминирован токеном сессии — он стабилен при перезагрузке
+		// страницы, но различается между учениками.
+		if quiz.ShuffleQuestions || quiz.ShuffleAnswers {
+			rng := rand.New(rand.NewSource(seedFromToken(token)))
+			if quiz.ShuffleQuestions {
+				rng.Shuffle(len(questions), func(i, j int) {
+					questions[i], questions[j] = questions[j], questions[i]
+				})
+			}
+			if quiz.ShuffleAnswers {
+				for qi := range questions {
+					ans := questions[qi].Answers
+					rng.Shuffle(len(ans), func(i, j int) {
+						ans[i], ans[j] = ans[j], ans[i]
+					})
+				}
+			}
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
